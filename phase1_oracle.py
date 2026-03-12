@@ -20,14 +20,21 @@ class DeribitOracle:
 
     async def get_implied_volatility(self, currency: str) -> float:
         """Holt die aktuelle Implied Volatility (DVOL) für die Währung."""
-        # Nutze den direkten Index-Preis für DVOL (z.B. btc_dvol_usd)
-        url = f"{self.base_url}/get_index_price?index_name={currency.lower()}_dvol_usd"
+        import time
+        now_ms = int(time.time() * 1000)
+        start_ms = now_ms - 3600000 # 1 Stunde zurück
+        
+        url = f"{self.base_url}/get_volatility_index_data?currency={currency.upper()}&start_timestamp={start_ms}&end_timestamp={now_ms}&resolution=3600"
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 data = await response.json()
-                if "result" in data and "index_price" in data["result"]:
-                    # DVOL ist in Prozentpunkten (z.B. 45.5), wir brauchen Dezimal (0.455)
-                    return float(data["result"]["index_price"]) / 100.0
+                if "result" in data and "data" in data["result"] and len(data["result"]["data"]) > 0:
+                    # Nimm den aktuellsten DVOL Wert (Close-Preis der aktuellen Kerze)
+                    return float(data["result"]["data"][-1][4]) / 100.0 # Als Dezimalwert
+                
+                # Fallback, falls die API einen Fehler wirft
+                if "error" in data:
+                    raise ValueError(data["error"].get("message", str(data)))
                 raise ValueError(f"Fehler beim Abrufen der IV: {data}")
 
     def calculate_probability(self, S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:
@@ -50,6 +57,32 @@ class DeribitOracle:
         probability = stats.norm.cdf(d2)
         return probability
 
+    def _format_deribit_date(self, expiry_date_str: str) -> str:
+        """Formatiert '2026-03-13 08:00:00' zu '13MAR26' für Deribit Instrumente."""
+        dt = datetime.strptime(expiry_date_str, "%Y-%m-%d %H:%M:%S")
+        return dt.strftime("%d%b%y").upper()
+
+    async def get_option_iv(self, currency: str, target_price: float, expiry_date_str: str) -> float:
+        """Holt die exakte Implied Volatility (mark_iv) für den spezifischen Strike und Verfall."""
+        try:
+            date_str = self._format_deribit_date(expiry_date_str)
+            strike = int(target_price)
+            # Konstruiere den Instrumentennamen, z.B. BTC-13MAR26-70000-C
+            instrument = f"{currency.upper()}-{date_str}-{strike}-C"
+            
+            url = f"{self.base_url}/ticker?instrument_name={instrument}"
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    data = await response.json()
+                    if "result" in data and "mark_iv" in data["result"]:
+                        iv = data["result"]["mark_iv"]
+                        if iv > 0:
+                            return iv / 100.0 # Als Dezimalwert
+            return None
+        except Exception as e:
+            print(f"[WARNUNG] Konnte spezifische IV nicht abrufen: {e}")
+            return None
+
     async def evaluate_target(self, currency: str, target_price: float, expiry_date_str: str) -> dict:
         """
         Evaluiert die Wahrscheinlichkeit für ein spezifisches Preisziel und Datum.
@@ -66,13 +99,16 @@ class DeribitOracle:
 
             T = time_to_expiry_seconds / (365.25 * 24 * 3600)
 
-            # 2. Aktuellen Preis und IV asynchron abrufen
-            S, sigma = await asyncio.gather(
-                self.get_index_price(currency),
-                self.get_implied_volatility(currency)
-            )
+            # 2. Aktuellen Preis abrufen
+            S = await self.get_index_price(currency)
+            
+            # 3. IV abrufen (Zuerst spezifische Option versuchen, dann DVOL Fallback)
+            sigma = await self.get_option_iv(currency, target_price, expiry_date_str)
+            if sigma is None:
+                # Fallback auf 30-Tage DVOL
+                sigma = await self.get_implied_volatility(currency)
 
-            # 3. Wahrscheinlichkeit berechnen (N(d2))
+            # 4. Wahrscheinlichkeit berechnen (N(d2))
             prob = self.calculate_probability(S=S, K=target_price, T=T, sigma=sigma)
 
             return {

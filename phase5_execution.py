@@ -1,106 +1,76 @@
 import os
+import time
 from dotenv import load_dotenv
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType
+
+# Versuche den offiziellen Polymarket Client zu importieren
+try:
+    from py_clob_client.client import ClobClient
+    from py_clob_client.clob_types import OrderArgs, OrderType
+    from py_clob_client.order_builder.constants import BUY, SELL
+    CLOB_AVAILABLE = True
+except ImportError:
+    CLOB_AVAILABLE = False
+
+load_dotenv()
 
 class PolymarketExecutor:
     def __init__(self, live_mode: bool = False):
         self.live_mode = live_mode
-        
-        # Lade Umgebungsvariablen
-        self.pk = os.getenv("PK")
-        self.chain_id = int(os.getenv("CHAIN_ID", "137"))
-        self.api_key = os.getenv("CLOB_API_KEY")
-        self.api_secret = os.getenv("CLOB_SECRET")
-        self.api_passphrase = os.getenv("CLOB_PASS_PHRASE")
-        self.host = "https://clob.polymarket.com"
-        
-        # Initialisiere den ClobClient
-        if self.api_key and self.api_secret and self.api_passphrase and self.pk:
-            self.client = ClobClient(
-                self.host,
-                key=self.api_key,
-                secret=self.api_secret,
-                passphrase=self.api_passphrase,
-                chain_id=self.chain_id,
-                signature_type=1,  # 1 für EOA (Externally Owned Account)
-                funder=self.pk     # Private Key für die Signatur der Order
-            )
+        self.private_key = os.getenv("PRIVATE_KEY")
+        self.host = os.getenv("POLYMARKET_HOST", "https://clob.polymarket.com")
+        self.chain_id = int(os.getenv("POLYMARKET_CHAIN_ID", "137")) # 137 = Polygon Mainnet
+        self.client = None
+
+        if self.live_mode:
+            if not CLOB_AVAILABLE:
+                raise ImportError("py_clob_client ist nicht installiert! Bitte 'pip install py_clob_client' ausführen.")
+            if not self.private_key:
+                raise ValueError("PRIVATE_KEY fehlt in der .env Datei für den Live-Modus!")
+            
+            print("[EXECUTION] Initialisiere Polymarket CLOB Client (LIVE MODE)...")
+            self.client = ClobClient(self.host, key=self.private_key, chain_id=self.chain_id)
+            # API Credentials ableiten (Standard-Prozess bei Polymarket)
+            self.client.set_api_creds(self.client.create_or_derive_api_creds())
+            print("[EXECUTION] ⚠️ LIVE TRADING AKTIV ⚠️")
         else:
-            self.client = None
-            if self.live_mode:
-                print("\n[WARNUNG] Fehlende API Credentials im .env File. Live-Modus wird fehlschlagen.")
+            print("[EXECUTION] Paper Trading Modus aktiv.")
 
-    def execute_trade(self, token_id: str, price: float, trade_size_usd: float, side: str = "BUY"):
+    def execute_trade(self, action: str, token_id: str, price: float, size_usd: float) -> float:
         """
-        Führt den Trade (BUY oder SELL) auf Polymarket aus (oder simuliert ihn im Paper-Trading-Modus).
+        Führt einen Trade aus (Paper oder Live).
+        Gibt die Anzahl der gehandelten Shares zurück.
         """
-        # 1. Anzahl der Shares berechnen (Polymarket unterstützt max 2 Nachkommastellen)
-        shares = round(trade_size_usd / price, 2)
-        
-        if shares <= 0:
-            print("Trade Size zu klein (0 Shares). Abbruch.")
-            return
+        shares = size_usd / price
 
-        # 2. Order Argumente vorbereiten
-        order_args = OrderArgs(
-            price=price,
-            size=shares,
-            side=side,
-            token_id=token_id
-        )
-
-        # ANSI Farbcodes für die Konsole
-        YELLOW = '\033[93m'
-        GREEN = '\033[92m'
-        RESET = '\033[0m'
-
-        # 3. Paper Trading Modus (live_mode = False)
         if not self.live_mode:
-            print(f"\n{YELLOW}[PAPER TRADE - EXECUTION WÜRDE STARTEN]{RESET}")
-            print(f"{YELLOW}Aktion:        {side}{RESET}")
-            print(f"{YELLOW}Token ID:      {token_id[:15]}...{RESET}")
-            print(f"{YELLOW}Preis:         ${price:.2f}{RESET}")
-            print(f"{YELLOW}Shares:        {shares:.2f}{RESET}")
-            print(f"{YELLOW}Gesamtvolumen: ${trade_size_usd:.2f}{RESET}")
-            return
+            # Paper Trading Logik
+            print(f"[PAPER TRADE] {action} {shares:.2f} Shares von Token {token_id} zu ${price:.4f}")
+            time.sleep(0.5) # Simuliere Latenz
+            return shares
 
-        # 4. Live Execution Modus (live_mode = True)
-        print(f"\n{GREEN}[LIVE TRADE - SENDE ORDER AN POLYMARKET]{RESET}")
+        # LIVE TRADING LOGIK (Gamma API / CLOB)
+        print(f"[LIVE TRADE] Sende {action} Order an Polymarket CLOB...")
         try:
-            if not self.client:
-                raise ValueError("ClobClient ist nicht initialisiert. Überprüfe die .env Datei.")
-
-            # Order erstellen und kryptografisch signieren (Fill-Or-Kill)
-            signed_order = self.client.create_order(
-                order_args, 
-                OrderType.FOK
+            side = BUY if action.upper() == "BUY" else SELL
+            
+            # FOK (Fill or Kill) Order erstellen, um Teilausführungen zu vermeiden
+            order_args = OrderArgs(
+                price=price,
+                size=shares,
+                side=side,
+                token_id=token_id
             )
             
-            # Order an das Orderbuch senden
-            response = self.client.post_order(signed_order)
+            signed_order = self.client.create_order(order_args)
+            response = self.client.post_order(signed_order, OrderType.FOK)
             
-            print(f"{GREEN}Order erfolgreich gesendet!{RESET}")
-            print(f"{GREEN}API Response: {response}{RESET}")
-            
+            if response and response.get("success"):
+                print(f"[LIVE TRADE ERFOLGREICH] {shares:.2f} Shares zu ${price:.4f} gehandelt. OrderID: {response.get('orderID')}")
+                return shares
+            else:
+                print(f"[LIVE TRADE ABGELEHNT] Polymarket Response: {response}")
+                return 0.0
+                
         except Exception as e:
-            print(f"\n[FEHLER] Fehler bei der Live-Ausführung: {e}")
-
-# --- Test / Ausführung ---
-if __name__ == "__main__":
-    # Lädt die .env Datei aus dem aktuellen Verzeichnis
-    load_dotenv()
-    
-    # Instanziere den Executor im sicheren Paper-Trading-Modus
-    executor = PolymarketExecutor(live_mode=False)
-    
-    # Fiktiver Trade aus Szenario A (Phase 4)
-    test_token = "21742633143463906290569050155826241533067272736897614950488156847949938836055"
-    pm_ask = 0.50
-    trade_size = 65.00  # 65 USDC
-    
-    executor.execute_trade(
-        token_id=test_token, 
-        pm_ask_price=pm_ask, 
-        trade_size_usd=trade_size
-    )
+            print(f"[LIVE TRADE FEHLER] {e}")
+            return 0.0

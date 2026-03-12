@@ -31,22 +31,22 @@ class PolymarketExecutor:
             if self.live_mode:
                 print("\n[WARNUNG] Fehlende API Credentials im .env File. Live-Modus wird fehlschlagen.")
 
-    def execute_trade(self, token_id: str, pm_ask_price: float, trade_size_usd: float):
+    def execute_trade(self, token_id: str, price: float, trade_size_usd: float, side: str = "BUY"):
         """
-        Führt den Trade auf Polymarket aus (oder simuliert ihn im Paper-Trading-Modus).
+        Führt den Trade (BUY oder SELL) auf Polymarket aus (oder simuliert ihn im Paper-Trading-Modus).
         """
         # 1. Anzahl der Shares berechnen (Polymarket unterstützt max 2 Nachkommastellen)
-        shares_to_buy = round(trade_size_usd / pm_ask_price, 2)
+        shares = round(trade_size_usd / price, 2)
         
-        if shares_to_buy <= 0:
+        if shares <= 0:
             print("Trade Size zu klein (0 Shares). Abbruch.")
             return
 
         # 2. Order Argumente vorbereiten
         order_args = OrderArgs(
-            price=pm_ask_price,
-            size=shares_to_buy,
-            side="BUY",
+            price=price,
+            size=shares,
+            side=side,
             token_id=token_id
         )
 
@@ -58,10 +58,10 @@ class PolymarketExecutor:
         # 3. Paper Trading Modus (live_mode = False)
         if not self.live_mode:
             print(f"\n{YELLOW}[PAPER TRADE - EXECUTION WÜRDE STARTEN]{RESET}")
-            print(f"{YELLOW}Aktion:        KAUFEN (BUY){RESET}")
+            print(f"{YELLOW}Aktion:        {side}{RESET}")
             print(f"{YELLOW}Token ID:      {token_id[:15]}...{RESET}")
-            print(f"{YELLOW}Preis:         ${pm_ask_price:.2f}{RESET}")
-            print(f"{YELLOW}Shares:        {shares_to_buy:.2f}{RESET}")
+            print(f"{YELLOW}Preis:         ${price:.2f}{RESET}")
+            print(f"{YELLOW}Shares:        {shares:.2f}{RESET}")
             print(f"{YELLOW}Gesamtvolumen: ${trade_size_usd:.2f}{RESET}")
             return
 

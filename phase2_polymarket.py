@@ -4,6 +4,47 @@ import aiohttp
 class PolymarketClient:
     def __init__(self):
         self.base_url = "https://clob.polymarket.com"
+        self.gamma_url = "https://gamma-api.polymarket.com"
+
+    async def find_market_token(self, keyword: str) -> dict:
+        """
+        Sucht in der Polymarket Gamma API nach aktiven Märkten, die das Keyword enthalten,
+        und gibt die Token-ID für das "YES" Outcome zurück.
+        """
+        # Wir suchen nach aktiven Märkten
+        url = f"{self.gamma_url}/markets?limit=100&active=true&closed=false"
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        markets = await response.json()
+                        
+                        # Suche nach dem Keyword in der Frage
+                        for market in markets:
+                            question = market.get("question", "")
+                            if keyword.lower() in question.lower():
+                                outcomes = market.get("outcomes", [])
+                                token_ids = market.get("clobTokenIds", [])
+                                
+                                # Finde den Index für "Yes"
+                                try:
+                                    yes_index = outcomes.index("Yes")
+                                    yes_token_id = token_ids[yes_index]
+                                    
+                                    return {
+                                        "question": question,
+                                        "token_id": yes_token_id,
+                                        "market_slug": market.get("slug")
+                                    }
+                                except ValueError:
+                                    continue # "Yes" nicht gefunden, nächster Markt
+                                    
+                        raise ValueError(f"Kein aktiver Markt mit dem Keyword '{keyword}' gefunden.")
+                    else:
+                        raise ValueError(f"Gamma API Fehler: {response.status}")
+            except Exception as e:
+                raise Exception(f"Fehler bei der Marktsuche: {e}")
 
     async def get_orderbook(self, token_id: str) -> dict:
         """

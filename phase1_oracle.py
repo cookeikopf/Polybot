@@ -20,13 +20,14 @@ class DeribitOracle:
 
     async def get_implied_volatility(self, currency: str) -> float:
         """Holt die aktuelle Implied Volatility (DVOL) für die Währung."""
-        url = f"{self.base_url}/get_volatility_index_data?currency={currency.upper()}"
+        # Nutze den direkten Index-Preis für DVOL (z.B. btc_dvol_usd)
+        url = f"{self.base_url}/get_index_price?index_name={currency.lower()}_dvol_usd"
         async with aiohttp.ClientSession() as session:
             async with session.get(url) as response:
                 data = await response.json()
-                if "result" in data and "data" in data["result"]:
-                    # Nimm den aktuellsten DVOL Wert (Close-Preis der aktuellen Kerze)
-                    return float(data["result"]["data"][-1][4]) / 100.0 # Als Dezimalwert
+                if "result" in data and "index_price" in data["result"]:
+                    # DVOL ist in Prozentpunkten (z.B. 45.5), wir brauchen Dezimal (0.455)
+                    return float(data["result"]["index_price"]) / 100.0
                 raise ValueError(f"Fehler beim Abrufen der IV: {data}")
 
     def calculate_probability(self, S: float, K: float, T: float, sigma: float, r: float = 0.0) -> float:

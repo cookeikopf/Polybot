@@ -88,8 +88,13 @@ async def main():
             # 2. MÄRKTE ABRUFEN
             pm_client = PolymarketClient()
             
-            # Hole alle aktiven BTC-Märkte von Polymarket
+            # Hole alle aktiven BTC-Märkte von Polymarket (Events Endpoint)
             markets = await pm_client.get_active_btc_markets()
+            
+            # Hole zusätzlich den aktuellen 15-Minuten Up/Down Markt (Game-Changer)
+            m15_markets = await pm_client.get_15m_btc_market()
+            if m15_markets:
+                markets.extend(m15_markets)
             
             # FALLBACK: Wenn die API keine kurzfristigen Märkte liefert (Polymarket Liquiditätsproblem),
             # fügen wir manuell einen bekannten Markt hinzu, um das System am Laufen zu halten.
@@ -109,9 +114,11 @@ async def main():
                 strike = m.get("strike")
                 days_to_expiry = m.get("days_to_expiry")
                 token_id = m.get("token_id")
+                is_15m = m.get("is_15m_updown", False)
                 
                 # --- FILTER 1: GAMMA/THETA RISIKO ---
-                if days_to_expiry < CONFIG["MIN_DAYS_TO_EXPIRY"]:
+                # 15m Märkte sind extrem kurzfristig, wir lassen sie explizit durch
+                if not is_15m and days_to_expiry < CONFIG["MIN_DAYS_TO_EXPIRY"]:
                     continue
                     
                 # --- FILTER 2: DYNAMIC ATM TARGETING ---

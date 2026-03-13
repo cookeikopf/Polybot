@@ -46,87 +46,63 @@ class PolymarketClient:
             except Exception as e:
                 raise Exception(f"Fehler bei der Marktsuche: {e}")
 
-    async def get_active_btc_markets(self) -> list:
+    async def get_15m_btc_market(self) -> list:
         """
-        Sucht in der Polymarket Gamma API nach aktiven Bitcoin-Märkten.
-        Nutzt Pagination, um ALLE Märkte zu scannen (nicht nur die Top 1000).
-        Extrahiert den Strike-Preis dynamisch, unabhängig vom exakten Wording.
+        Der 'Game-Changer': Berechnet den Slug für den aktuellen 15-Minuten BTC Up/Down Markt
+        und ruft diesen direkt ab. Das ist 10x schneller und umgeht das Indexing-Lag der Gamma API.
         """
-        import re
+        import time
         from datetime import datetime
+        import re
         
+        now = int(time.time())
+        # 900 Sekunden = 15 Minuten. Wir runden ab auf den Start der aktuellen Periode.
+        period_start = (now // 900) * 900
+        slug = f"btc-updown-15m-{period_start}"
+        
+        url = f"{self.gamma_url}/events?slug={slug}"
         btc_markets = []
-        limit = 500
-        offset = 0
-        max_pages = 20 # Max 10.000 Märkte scannen, um Endlosschleifen zu vermeiden
         
         async with aiohttp.ClientSession() as session:
-            for page in range(max_pages):
-                url = f"{self.gamma_url}/markets?limit={limit}&offset={offset}&active=true&closed=false"
-                
-                try:
-                    async with session.get(url) as response:
-                        if response.status != 200:
-                            print(f"[FEHLER] Gamma API Status: {response.status}")
-                            break
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        events = await response.json()
+                        if not events:
+                            return []
                             
-                        markets = await response.json()
-                        if not markets:
-                            break # Keine weiteren Märkte
-                            
+                        event = events[0]
+                        markets = event.get("markets", [])
+                        
                         for market in markets:
                             question = market.get("question", "")
                             description = market.get("description", "")
-                            group_title = market.get("groupItemTitle", "")
                             
-                            # 1. Ist es ein Bitcoin-Markt? (Check in Titel oder Beschreibung)
-                            text_to_search = f"{question} {description}".lower()
-                            if "bitcoin" not in text_to_search and "btc" not in text_to_search:
-                                continue
-                                
-                            # 2. Dynamische Strike-Preis Extraktion
-                            # Wir suchen nach JEDER Zahl, die ein plausibler BTC-Preis sein könnte (z.B. 20k bis 500k)
-                            # Wir checken zuerst den groupItemTitle (oft bei gebündelten Preis-Märkten genutzt wie "$70,000")
-                            # Dann die Frage, dann die Beschreibung.
-                            
+                            # Strike-Preis aus der Description oder Question extrahieren
                             strike = None
-                            search_texts = [group_title, question, description]
                             
-                            for text in search_texts:
-                                if not text:
-                                    continue
-                                    
-                                # Finde alle Zahlen-Muster (mit oder ohne $, mit Komma, mit k/m)
-                                # Matcht: 70000, 70,000, $70k, 70.5k, 100000
-                                matches = re.finditer(r'\$?([0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?|[0-9]+(\.[0-9]+)?)[kKmM]?', text)
-                                
-                                for match in matches:
-                                    val_str = match.group(0).lower().replace('$', '').replace(',', '')
-                                    
+                            # Bei Up/Down Märkten steht der Strike oft in der Description ("The strike price is $65,432.10")
+                            match = re.search(r'strike price is \$?([0-9,]+(\.[0-9]+)?)', description, re.IGNORECASE)
+                            if match:
+                                strike = float(match.group(1).replace(',', ''))
+                            else:
+                                # Fallback: Suche nach Zahlen im Titel
+                                match = re.search(r'\$?([0-9]{2,}(,[0-9]{3})*(\.[0-9]+)?)[kKmM]?', question)
+                                if match:
+                                    val_str = match.group(1).replace(',', '')
                                     multiplier = 1
-                                    if 'k' in val_str:
-                                        multiplier = 1000
-                                        val_str = val_str.replace('k', '')
-                                    elif 'm' in val_str:
-                                        multiplier = 1000000
-                                        val_str = val_str.replace('m', '')
-                                        
+                                    if 'k' in match.group(0).lower(): multiplier = 1000
+                                    elif 'm' in match.group(0).lower(): multiplier = 1000000
                                     try:
-                                        potential_price = float(val_str) * multiplier
-                                        # Plausibilitätscheck: Ist das ein BTC Preis? (20k - 500k)
-                                        if 20000 <= potential_price <= 500000:
-                                            strike = potential_price
-                                            break # Strike gefunden!
+                                        potential_strike = float(val_str) * multiplier
+                                        if 20000 <= potential_strike <= 500000:
+                                            strike = potential_strike
                                     except ValueError:
-                                        continue
+                                        pass
                                         
-                                if strike:
-                                    break # Wir haben den Strike für diesen Markt gefunden
-                                    
                             if not strike:
-                                continue # Kein plausibler Strike-Preis gefunden -> Kein Preis-Markt
+                                continue # Ohne Strike können wir kein BSM berechnen
                                 
-                            # 3. Ablaufdatum extrahieren
                             end_date_str = market.get("endDate")
                             if not end_date_str:
                                 continue
@@ -134,15 +110,14 @@ class PolymarketClient:
                             try:
                                 clean_date_str = end_date_str.split('.')[0].replace('Z', '')
                                 end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
-                                now = datetime.utcnow()
-                                days_to_expiry = (end_date - now).total_seconds() / 86400.0
+                                now_dt = datetime.utcnow()
+                                days_to_expiry = (end_date - now_dt).total_seconds() / 86400.0
                                 
                                 if days_to_expiry <= 0:
                                     continue
                             except Exception:
                                 continue
-                            
-                            # 4. Token ID für "Yes" Outcome finden
+                                
                             outcomes = market.get("outcomes", [])
                             token_ids = market.get("clobTokenIds", [])
                             
@@ -157,10 +132,120 @@ class PolymarketClient:
                                 "strike": strike,
                                 "days_to_expiry": days_to_expiry,
                                 "token_id": yes_token_id,
-                                "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S")
+                                "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S"),
+                                "is_15m_updown": True
                             })
                             
-                        offset += limit # Nächste Seite
+            except Exception as e:
+                print(f"[FEHLER] get_15m_btc_market: {e}")
+                
+        return btc_markets
+
+    async def get_active_btc_markets(self) -> list:
+        """
+        Sucht in der Polymarket Gamma API nach aktiven Bitcoin-Märkten.
+        Nutzt den /events Endpoint (effizienter als /markets) und Pagination.
+        """
+        import re
+        from datetime import datetime
+        
+        btc_markets = []
+        limit = 100
+        offset = 0
+        max_pages = 10 # 1000 Events scannen
+        
+        async with aiohttp.ClientSession() as session:
+            for page in range(max_pages):
+                # Wir nutzen /events statt /markets, da Events die zugehörigen Märkte gebündelt mitliefern
+                url = f"{self.gamma_url}/events?limit={limit}&offset={offset}&active=true&closed=false"
+                
+                try:
+                    async with session.get(url) as response:
+                        if response.status != 200:
+                            break
+                            
+                        events = await response.json()
+                        if not events:
+                            break
+                            
+                        for event in events:
+                            title = event.get("title", "").lower()
+                            description = event.get("description", "").lower()
+                            
+                            # Ist es ein Bitcoin Event?
+                            if "bitcoin" not in title and "btc" not in title and "bitcoin" not in description:
+                                continue
+                                
+                            markets = event.get("markets", [])
+                            for market in markets:
+                                question = market.get("question", "")
+                                market_desc = market.get("description", "")
+                                
+                                strike = None
+                                search_texts = [title, question, market_desc]
+                                
+                                for text in search_texts:
+                                    if not text:
+                                        continue
+                                        
+                                    matches = re.finditer(r'\$?([0-9]{1,3}(,[0-9]{3})*(\.[0-9]+)?|[0-9]+(\.[0-9]+)?)[kKmM]?', text)
+                                    for match in matches:
+                                        val_str = match.group(0).lower().replace('$', '').replace(',', '')
+                                        multiplier = 1
+                                        if 'k' in val_str:
+                                            multiplier = 1000
+                                            val_str = val_str.replace('k', '')
+                                        elif 'm' in val_str:
+                                            multiplier = 1000000
+                                            val_str = val_str.replace('m', '')
+                                            
+                                        try:
+                                            potential_price = float(val_str) * multiplier
+                                            if 20000 <= potential_price <= 500000:
+                                                strike = potential_price
+                                                break
+                                        except ValueError:
+                                            continue
+                                    if strike:
+                                        break
+                                        
+                                if not strike:
+                                    continue
+                                    
+                                end_date_str = market.get("endDate")
+                                if not end_date_str:
+                                    continue
+                                    
+                                try:
+                                    clean_date_str = end_date_str.split('.')[0].replace('Z', '')
+                                    end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
+                                    now = datetime.utcnow()
+                                    days_to_expiry = (end_date - now).total_seconds() / 86400.0
+                                    
+                                    if days_to_expiry <= 0:
+                                        continue
+                                except Exception:
+                                    continue
+                                
+                                outcomes = market.get("outcomes", [])
+                                token_ids = market.get("clobTokenIds", [])
+                                
+                                try:
+                                    yes_index = next(i for i, x in enumerate(outcomes) if x.lower() == "yes")
+                                    yes_token_id = token_ids[yes_index]
+                                except (ValueError, StopIteration):
+                                    continue
+                                    
+                                btc_markets.append({
+                                    "question": question,
+                                    "strike": strike,
+                                    "days_to_expiry": days_to_expiry,
+                                    "token_id": yes_token_id,
+                                    "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "is_15m_updown": False
+                                })
+                                
+                        offset += limit
                         
                 except Exception as e:
                     print(f"[FEHLER] get_active_btc_markets Pagination: {e}")

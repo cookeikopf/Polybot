@@ -114,9 +114,12 @@ class PolymarketClient:
                                         except ValueError:
                                             pass
                                             
+                                # Wenn kein Strike gefunden wurde, ist es ein echter "Up/Down from current price" Markt.
+                                # Wir setzen den Strike vorerst auf 0 und markieren ihn, damit main.py den aktuellen BTC Preis einsetzt.
+                                needs_current_price = False
                                 if not strike:
-                                    print(f"[DEBUG] 15m-Markt gefunden, aber Strike fehlt: {question} | Desc: {description[:100]}...")
-                                    continue # Ohne Strike können wir kein BSM berechnen
+                                    strike = 0.0
+                                    needs_current_price = True
                                     
                                 end_date_str = market.get("endDate")
                                 if not end_date_str:
@@ -150,7 +153,8 @@ class PolymarketClient:
                                     "days_to_expiry": days_to_expiry,
                                     "token_id": yes_token_id,
                                     "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S"),
-                                    "is_15m_updown": True
+                                    "is_15m_updown": True,
+                                    "needs_current_price": needs_current_price
                                 })
                                 
                 except Exception as e:

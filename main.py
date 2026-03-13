@@ -115,6 +115,12 @@ async def main():
                 days_to_expiry = m.get("days_to_expiry")
                 token_id = m.get("token_id")
                 is_15m = m.get("is_15m_updown", False)
+                needs_current_price = m.get("needs_current_price", False)
+                
+                # Wenn es ein reiner Up/Down Markt ohne festen Strike ist,
+                # ist der Strike-Preis der aktuelle BTC-Preis zum Zeitpunkt der Markterstellung/Betrachtung.
+                if needs_current_price:
+                    strike = btc_price
                 
                 # --- FILTER 1: GAMMA/THETA RISIKO ---
                 # 15m Märkte sind extrem kurzfristig, wir lassen sie explizit durch

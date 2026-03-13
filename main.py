@@ -1,3 +1,4 @@
+import asyncio
 import time
 import json
 import os
@@ -5,10 +6,9 @@ import csv
 from datetime import datetime
 
 # Importiere die Module aus den vorherigen Phasen
-# (Passe die Import-Namen an deine tatsächlichen Dateinamen an, falls abweichend)
 try:
-    from phase1_oracle import get_deribit_data, calculate_bsm_prob
-    from phase2_market import get_polymarket_orderbook, get_active_markets
+    from phase1_oracle import DeribitOracle
+    from phase2_polymarket import PolymarketClient
 except ImportError:
     print("[WARNUNG] Phase 1 & 2 Module nicht gefunden. Bitte Dateinamen prüfen.")
 
@@ -56,7 +56,7 @@ def log_trade(action, token_id, strike, price, shares, edge, usd_value):
             writer.writerow(["Timestamp", "Action", "TokenID", "Strike", "Price", "Shares", "Edge", "USD_Value"])
         writer.writerow([datetime.utcnow().isoformat(), action, token_id, strike, price, shares, edge, usd_value])
 
-def main():
+async def main():
     print("===================================================")
     print("🧠 STATARB BOT - INSTITUTIONAL GRADE (V2.0)")
     print("===================================================")
@@ -75,16 +75,40 @@ def main():
             timestamp = datetime.utcnow().strftime("%H:%M:%S")
             
             # 1. ORACLE DATEN ABRUFEN
-            # (Passe die Funktionsaufrufe an deine Phase 1 an)
-            btc_price, iv = get_deribit_data()
+            oracle = DeribitOracle()
+            btc_price = await oracle.get_index_price("BTC")
+            iv = await oracle.get_implied_volatility("BTC")
+            
             if not btc_price or not iv:
-                time.sleep(CONFIG["SLEEP_TIME"])
+                await asyncio.sleep(CONFIG["SLEEP_TIME"])
                 continue
                 
             print(f"\n[{timestamp}] 🌐 ORACLE UPDATE | BTC: ${btc_price:.2f} | IV: {iv:.2%}")
 
             # 2. MÄRKTE ABRUFEN
-            markets = get_active_markets()
+            pm_client = PolymarketClient()
+            # Wir holen uns einen Beispielmarkt (da get_active_markets nicht existiert)
+            # In einer echten Implementierung müsste hier eine Liste von Märkten von Polymarket geholt werden
+            # Für diesen Forward-Test simulieren wir eine Liste mit einem Markt, den wir über find_market_token finden könnten
+            # oder wir nutzen den Hardcoded-Markt aus Phase 3 als Basis für die Suche
+            
+            # Da wir dynamisches Targeting wollen, bräuchten wir eigentlich alle Polymarket BTC Märkte.
+            # Da wir die Funktion nicht haben, simulieren wir das Iterieren über einen bekannten Markt
+            # oder wir suchen nach "Bitcoin" Märkten.
+            
+            # HACK: Da wir get_active_markets nicht haben, suchen wir nach einem Markt
+            try:
+                market_info = await pm_client.find_market_token("Bitcoin")
+                markets = [{
+                    "strike": 100000.0, # Dummy Strike, da find_market_token den Strike nicht parst
+                    "days_to_expiry": 30.0, # Dummy Expiry
+                    "token_id": market_info["token_id"],
+                    "expiry_date_str": "2026-12-31 08:00:00"
+                }]
+            except Exception as e:
+                print(f"Fehler bei der Marktsuche: {e}")
+                markets = []
+
             
             for m in markets:
                 strike = m.get("strike")
@@ -101,10 +125,19 @@ def main():
                     continue
 
                 # 3. FAIR VALUE BERECHNEN (BSM)
-                oracle_prob = calculate_bsm_prob(btc_price, strike, days_to_expiry, iv)
+                # T in Jahren berechnen
+                T = days_to_expiry / 365.25
+                oracle_prob = oracle.calculate_probability(S=btc_price, K=strike, T=T, sigma=iv)
                 
                 # 4. ORDERBUCH ABRUFEN
-                pm_bid, pm_ask = get_polymarket_orderbook(token_id)
+                try:
+                    prices = await pm_client.get_best_prices(token_id)
+                    pm_bid = prices["best_bid"]
+                    pm_ask = prices["best_ask"]
+                except Exception as e:
+                    print(f"Fehler beim Abrufen des Orderbuchs für {token_id}: {e}")
+                    continue
+                
                 if not pm_bid or not pm_ask or pm_ask <= 0 or pm_bid <= 0:
                     continue
 
@@ -155,4 +188,4 @@ def main():
         time.sleep(CONFIG["SLEEP_TIME"])
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -139,6 +139,18 @@ class PolymarketClient:
                                 outcomes = market.get("outcomes", [])
                                 token_ids = market.get("clobTokenIds", [])
                                 
+                                import json
+                                if isinstance(outcomes, str):
+                                    try:
+                                        outcomes = json.loads(outcomes)
+                                    except:
+                                        outcomes = []
+                                if isinstance(token_ids, str):
+                                    try:
+                                        token_ids = json.loads(token_ids)
+                                    except:
+                                        token_ids = []
+                                
                                 try:
                                     # Bei Up/Down Märkten heißen die Outcomes "Up" und "Down", nicht "Yes" und "No"!
                                     yes_index = next(i for i, x in enumerate(outcomes) if x.lower() in ["yes", "up"])
@@ -250,6 +262,18 @@ class PolymarketClient:
                                 
                                 outcomes = market.get("outcomes", [])
                                 token_ids = market.get("clobTokenIds", [])
+                                
+                                import json
+                                if isinstance(outcomes, str):
+                                    try:
+                                        outcomes = json.loads(outcomes)
+                                    except:
+                                        outcomes = []
+                                if isinstance(token_ids, str):
+                                    try:
+                                        token_ids = json.loads(token_ids)
+                                    except:
+                                        token_ids = []
                                 
                                 try:
                                     yes_index = next(i for i, x in enumerate(outcomes) if x.lower() == "yes")

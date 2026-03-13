@@ -35,8 +35,9 @@ CONFIG = {
     "SLEEP_TIME": 15                  # Pause zwischen den Scans in Sekunden
 }
 
-INVENTORY_FILE = "inventory.json"
-JOURNAL_FILE = "trade_journal.csv"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+INVENTORY_FILE = os.path.join(BASE_DIR, "inventory.json")
+JOURNAL_FILE = os.path.join(BASE_DIR, "trade_journal.csv")
 
 def load_inventory():
     if os.path.exists(INVENTORY_FILE):
@@ -67,7 +68,7 @@ async def main():
     print("===================================================")
 
     inventory = load_inventory()
-    risk_manager = RiskManager(account_balance=CONFIG["ACCOUNT_BALANCE"], max_kelly_fraction=0.5)
+    risk_manager = RiskManager(initial_bankroll=CONFIG["ACCOUNT_BALANCE"], kelly_multiplier=0.5, max_bet_size=CONFIG["MAX_TRADE_SIZE"])
     executor = PolymarketExecutor(live_mode=CONFIG["LIVE_MODE"])
 
     while True:
@@ -162,7 +163,8 @@ async def main():
                 # 🟢 ENTRY LOGIC (BUY)
                 # ==========================================
                 if current_shares == 0 and buy_edge >= CONFIG["ENTRY_EDGE"]:
-                    kelly_size_usd = risk_manager.calculate_kelly_size(win_prob=oracle_prob, pm_ask_price=pm_ask)
+                    kelly_result = risk_manager.calculate_position_size(true_prob=oracle_prob, market_price=pm_ask, is_crypto=True)
+                    kelly_size_usd = kelly_result.get("bet_size", 0.0)
                     trade_size_usd = min(kelly_size_usd, CONFIG["MAX_TRADE_SIZE"])
                     
                     if trade_size_usd >= 5.0: # Polymarket Minimum

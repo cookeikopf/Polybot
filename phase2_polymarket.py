@@ -50,6 +50,8 @@ class PolymarketClient:
         """
         Der 'Game-Changer': Berechnet den Slug für den aktuellen 15-Minuten BTC Up/Down Markt
         und ruft diesen direkt ab. Das ist 10x schneller und umgeht das Indexing-Lag der Gamma API.
+        Prüft sowohl die aktuelle als auch die nächste Periode, da Märkte oft schon vorab gelistet werden
+        oder die aktuelle Periode kurz vor Ablauf geschlossen wird.
         """
         import time
         from datetime import datetime
@@ -58,87 +60,99 @@ class PolymarketClient:
         now = int(time.time())
         # 900 Sekunden = 15 Minuten. Wir runden ab auf den Start der aktuellen Periode.
         period_start = (now // 900) * 900
-        slug = f"btc-updown-15m-{period_start}"
         
-        url = f"{self.gamma_url}/events?slug={slug}"
+        # Wir prüfen die aktuelle und die nächste Periode
+        periods_to_check = [period_start, period_start + 900]
         btc_markets = []
         
         async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        events = await response.json()
-                        if not events:
-                            return []
-                            
-                        event = events[0]
-                        markets = event.get("markets", [])
-                        
-                        for market in markets:
-                            question = market.get("question", "")
-                            description = market.get("description", "")
-                            
-                            # Strike-Preis aus der Description oder Question extrahieren
-                            strike = None
-                            
-                            # Bei Up/Down Märkten steht der Strike oft in der Description ("The strike price is $65,432.10")
-                            match = re.search(r'strike price is \$?([0-9,]+(\.[0-9]+)?)', description, re.IGNORECASE)
-                            if match:
-                                strike = float(match.group(1).replace(',', ''))
-                            else:
-                                # Fallback: Suche nach Zahlen im Titel
-                                match = re.search(r'\$?([0-9]{2,}(,[0-9]{3})*(\.[0-9]+)?)[kKmM]?', question)
-                                if match:
-                                    val_str = match.group(1).replace(',', '')
-                                    multiplier = 1
-                                    if 'k' in match.group(0).lower(): multiplier = 1000
-                                    elif 'm' in match.group(0).lower(): multiplier = 1000000
-                                    try:
-                                        potential_strike = float(val_str) * multiplier
-                                        if 20000 <= potential_strike <= 500000:
-                                            strike = potential_strike
-                                    except ValueError:
-                                        pass
-                                        
-                            if not strike:
-                                continue # Ohne Strike können wir kein BSM berechnen
-                                
-                            end_date_str = market.get("endDate")
-                            if not end_date_str:
-                                continue
-                                
-                            try:
-                                clean_date_str = end_date_str.split('.')[0].replace('Z', '')
-                                end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
-                                now_dt = datetime.utcnow()
-                                days_to_expiry = (end_date - now_dt).total_seconds() / 86400.0
-                                
-                                if days_to_expiry <= 0:
-                                    continue
-                            except Exception:
-                                continue
-                                
-                            outcomes = market.get("outcomes", [])
-                            token_ids = market.get("clobTokenIds", [])
-                            
-                            try:
-                                yes_index = next(i for i, x in enumerate(outcomes) if x.lower() == "yes")
-                                yes_token_id = token_ids[yes_index]
-                            except (ValueError, StopIteration):
-                                continue
-                                
-                            btc_markets.append({
-                                "question": question,
-                                "strike": strike,
-                                "days_to_expiry": days_to_expiry,
-                                "token_id": yes_token_id,
-                                "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S"),
-                                "is_15m_updown": True
-                            })
-                            
-            except Exception as e:
-                print(f"[FEHLER] get_15m_btc_market: {e}")
+            for ts in periods_to_check:
+                slug = f"btc-updown-15m-{ts}"
+                url = f"{self.gamma_url}/events?slug={slug}"
                 
+                try:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            events = await response.json()
+                            if not events:
+                                continue
+                                
+                            event = events[0]
+                            # Überspringe geschlossene Events
+                            if event.get("closed", False):
+                                continue
+                                
+                            markets = event.get("markets", [])
+                            
+                            for market in markets:
+                                # Überspringe geschlossene Märkte
+                                if market.get("closed", False):
+                                    continue
+                                    
+                                question = market.get("question", "")
+                                description = market.get("description", "")
+                                
+                                # Strike-Preis aus der Description oder Question extrahieren
+                                strike = None
+                                
+                                # Bei Up/Down Märkten steht der Strike oft in der Description ("The strike price is $65,432.10")
+                                match = re.search(r'strike price is \$?([0-9,]+(\.[0-9]+)?)', description, re.IGNORECASE)
+                                if match:
+                                    strike = float(match.group(1).replace(',', ''))
+                                else:
+                                    # Fallback: Suche nach Zahlen im Titel
+                                    match = re.search(r'\$?([0-9]{2,}(,[0-9]{3})*(\.[0-9]+)?)[kKmM]?', question)
+                                    if match:
+                                        val_str = match.group(1).replace(',', '')
+                                        multiplier = 1
+                                        if 'k' in match.group(0).lower(): multiplier = 1000
+                                        elif 'm' in match.group(0).lower(): multiplier = 1000000
+                                        try:
+                                            potential_strike = float(val_str) * multiplier
+                                            if 20000 <= potential_strike <= 500000:
+                                                strike = potential_strike
+                                        except ValueError:
+                                            pass
+                                            
+                                if not strike:
+                                    continue # Ohne Strike können wir kein BSM berechnen
+                                    
+                                end_date_str = market.get("endDate")
+                                if not end_date_str:
+                                    continue
+                                    
+                                try:
+                                    clean_date_str = end_date_str.split('.')[0].replace('Z', '')
+                                    end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
+                                    now_dt = datetime.utcnow()
+                                    days_to_expiry = (end_date - now_dt).total_seconds() / 86400.0
+                                    
+                                    if days_to_expiry <= 0:
+                                        continue
+                                except Exception:
+                                    continue
+                                    
+                                outcomes = market.get("outcomes", [])
+                                token_ids = market.get("clobTokenIds", [])
+                                
+                                try:
+                                    yes_index = next(i for i, x in enumerate(outcomes) if x.lower() == "yes")
+                                    yes_token_id = token_ids[yes_index]
+                                except (ValueError, StopIteration):
+                                    continue
+                                    
+                                btc_markets.append({
+                                    "question": question,
+                                    "strike": strike,
+                                    "days_to_expiry": days_to_expiry,
+                                    "token_id": yes_token_id,
+                                    "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S"),
+                                    "is_15m_updown": True
+                                })
+                                
+                except Exception as e:
+                    print(f"[FEHLER] get_15m_btc_market für {slug}: {e}")
+                    
         return btc_markets
 
     async def get_active_btc_markets(self) -> list:

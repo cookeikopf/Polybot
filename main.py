@@ -1,135 +1,158 @@
-import asyncio
+import time
+import json
 import os
+import csv
 from datetime import datetime
-from dotenv import load_dotenv
 
-# Importiere die 5 Phasen-Module
-from phase1_oracle import DeribitOracle
-from phase2_polymarket import PolymarketClient
-from phase3_papertrader import PaperTrader
-from phase4_riskmanager import RiskManager
+# Importiere die Module aus den vorherigen Phasen
+# (Passe die Import-Namen an deine tatsächlichen Dateinamen an, falls abweichend)
+try:
+    from phase1_oracle import get_deribit_data, calculate_bsm_prob
+    from phase2_market import get_polymarket_orderbook, get_active_markets
+except ImportError:
+    print("[WARNUNG] Phase 1 & 2 Module nicht gefunden. Bitte Dateinamen prüfen.")
+
+from phase4_risk import RiskManager
 from phase5_execution import PolymarketExecutor
 
-async def main():
-    # Lade Umgebungsvariablen für die API Keys
-    load_dotenv()
-
-    # Zentrale Konfiguration für Diversifikation und Market Making
-    config = {
-        "BANKROLL": 1000.0,
-        "LIVE_MODE": False,  # Standardmäßig auf Sicherheit (Paper Trading)
-        "CHECK_INTERVAL": 60, # Sekunden
-        "MIN_EDGE": 0.02,     # Minimaler Edge (2%), um einen Trade auszulösen
-        "MARKETS": [
-            {
-                "CURRENCY": "BTC",
-                "TARGET_PRICE": 100000.0,
-                "EXPIRY_DATE": "2026-12-31 08:00:00",
-                "KEYWORD": "Bitcoin above $100,000 in 2026"
-            },
-            {
-                "CURRENCY": "ETH",
-                "TARGET_PRICE": 4000.0,
-                "EXPIRY_DATE": "2026-12-31 08:00:00",
-                "KEYWORD": "Ethereum above $4,000 in 2026"
-            }
-        ]
-    }
-
-    # Instanziierung der Klassen
-    oracle = DeribitOracle()
-    pm_client = PolymarketClient()
-    risk_manager = RiskManager()
-    executor = PolymarketExecutor(live_mode=config["LIVE_MODE"])
-
-    print("="*50)
-    print("🚀 STATARB TRADING BOT (MULTI-MARKET) 🚀")
-    print("="*50)
-    print("Suche nach passenden Märkten auf Polymarket...")
+# ==========================================
+# 🚀 NEXT-LEVEL QUANT CONFIGURATION
+# ==========================================
+CONFIG = {
+    "LIVE_MODE": False,               # Forward-Test Modus (Paper Trading)
+    "ACCOUNT_BALANCE": 1000.0,        # Virtuelles Startkapital
+    "MAX_TRADE_SIZE": 100.0,          # Hartes Limit pro Trade in USD
     
-    # Cache für die gefundenen Token-IDs und Logger
-    active_markets = []
+    # --- Dynamic Targeting ---
+    "MAX_STRIKE_DISTANCE_PCT": 0.08,  # Max 8% vom aktuellen BTC Preis (Fokus auf ATM)
+    "MIN_DAYS_TO_EXPIRY": 1.0,        # Keine Märkte unter 24h (Gamma-Risiko minimieren)
     
-    for m in config["MARKETS"]:
-        try:
-            market_info = await pm_client.find_market_token(m["KEYWORD"])
-            m["TOKEN_ID"] = market_info["token_id"]
-            
-            # Logger für jeden Markt initialisieren
-            market_config = {
-                "currency": m["CURRENCY"],
-                "target_price": m["TARGET_PRICE"],
-                "expiry_date": m["EXPIRY_DATE"],
-                "token_id": m["TOKEN_ID"]
-            }
-            m["LOGGER"] = PaperTrader(oracle, pm_client, market_config)
-            
-            active_markets.append(m)
-            print(f"✅ Markt gefunden: '{market_info['question']}' -> ID: {m['TOKEN_ID'][:8]}...")
-        except Exception as e:
-            print(f"❌ Markt nicht gefunden für '{m['KEYWORD']}': {e}")
+    # --- Hysteresis (Anti-Churning) ---
+    "ENTRY_EDGE": 0.05,               # BUY: Wir steigen erst ab 5% echtem Edge ein
+    "EXIT_EDGE": 0.01,                # SELL: Wir steigen aus, wenn der Edge unter 1% fällt (Convergence)
+    
+    # --- System ---
+    "SLEEP_TIME": 15                  # Pause zwischen den Scans in Sekunden
+}
 
-    if not active_markets:
-        print("Keine aktiven Märkte gefunden. Beende Bot.")
-        return
+INVENTORY_FILE = "inventory.json"
+JOURNAL_FILE = "trade_journal.csv"
 
-    print("="*50)
-    print(f"Live Mode:   {config['LIVE_MODE']}")
-    print(f"Bankroll:    ${config['BANKROLL']:,.2f}")
-    print(f"Min Edge:    {config['MIN_EDGE']:.2%}")
-    print("="*50)
+def load_inventory():
+    if os.path.exists(INVENTORY_FILE):
+        with open(INVENTORY_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-    # Asynchrone Endlosschleife
+def save_inventory(inventory):
+    with open(INVENTORY_FILE, "w") as f:
+        json.dump(inventory, f, indent=4)
+
+def log_trade(action, token_id, strike, price, shares, edge, usd_value):
+    file_exists = os.path.exists(JOURNAL_FILE)
+    with open(JOURNAL_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["Timestamp", "Action", "TokenID", "Strike", "Price", "Shares", "Edge", "USD_Value"])
+        writer.writerow([datetime.utcnow().isoformat(), action, token_id, strike, price, shares, edge, usd_value])
+
+def main():
+    print("===================================================")
+    print("🧠 STATARB BOT - INSTITUTIONAL GRADE (V2.0)")
+    print("===================================================")
+    print(f"Live Mode:      {CONFIG['LIVE_MODE']}")
+    print(f"Entry Edge:     {CONFIG['ENTRY_EDGE']:.2%}")
+    print(f"Exit Edge:      {CONFIG['EXIT_EDGE']:.2%}")
+    print(f"Max Distance:   {CONFIG['MAX_STRIKE_DISTANCE_PCT']:.2%}")
+    print("===================================================")
+
+    inventory = load_inventory()
+    risk_manager = RiskManager(account_balance=CONFIG["ACCOUNT_BALANCE"], max_kelly_fraction=0.5)
+    executor = PolymarketExecutor(live_mode=CONFIG["LIVE_MODE"])
+
     while True:
         try:
-            for m in active_markets:
-                # Schritt 1: Oracle-Ergebnis holen (Fair Value)
-                oracle_res = await oracle.evaluate_target(m["CURRENCY"], m["TARGET_PRICE"], m["EXPIRY_DATE"])
-                
-                # Schritt 2: Polymarket-Preise holen (Bid und Ask)
-                pm_res = await pm_client.get_best_prices(m["TOKEN_ID"])
-                
-                if oracle_res and pm_res:
-                    oracle_prob = oracle_res['probability_yes']
-                    pm_ask = pm_res['best_ask']
-                    pm_bid = pm_res['best_bid']
-                    
-                    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"[{timestamp}] {m['CURRENCY']} | Oracle: {oracle_prob:.2%} | PM Bid: {pm_bid:.2%} | PM Ask: {pm_ask:.2%}")
-                    
-                    # --- BUY LOGIC (Unterbewertet) ---
-                    buy_edge = oracle_prob - pm_ask
-                    if buy_edge > config["MIN_EDGE"]:
-                        trade_size_usd = risk_manager.calculate_position_size(config["BANKROLL"], oracle_prob, pm_ask)
-                        if trade_size_usd > 0:
-                            print(f"\n[{timestamp}] 🟢 BUY EDGE DETECTED ({buy_edge:+.2%}) für {m['CURRENCY']}! Size: ${trade_size_usd:.2f}")
-                            executor.execute_trade(m["TOKEN_ID"], pm_ask, trade_size_usd, side="BUY")
-                            m["LOGGER"].log_trade(oracle_prob, pm_ask, buy_edge, "BUY_YES")
-                            await asyncio.sleep(5) # Kurzer Cooldown nach Trade
-                            continue
-                            
-                    # --- SELL LOGIC (Überbewertet) ---
-                    sell_edge = pm_bid - oracle_prob
-                    if sell_edge > config["MIN_EDGE"]:
-                        # Hinweis: Im Live-Modus würde die API die Order ablehnen, wenn wir keine Shares haben.
-                        # Für ein perfektes System müsste hier der aktuelle Share-Bestand abgefragt werden.
-                        # Wir berechnen die Size basierend auf dem Edge, als würden wir "Short" gehen oder Gewinne mitnehmen.
-                        trade_size_usd = risk_manager.calculate_position_size(config["BANKROLL"], pm_bid, oracle_prob) # Parameter getauscht für Sell-Risk
-                        if trade_size_usd > 0:
-                            print(f"\n[{timestamp}] 🔴 SELL EDGE DETECTED ({sell_edge:+.2%}) für {m['CURRENCY']}! Size: ${trade_size_usd:.2f}")
-                            executor.execute_trade(m["TOKEN_ID"], pm_bid, trade_size_usd, side="SELL")
-                            m["LOGGER"].log_trade(oracle_prob, pm_bid, sell_edge, "SELL_YES")
-                            await asyncio.sleep(5) # Kurzer Cooldown nach Trade
-                            continue
-                            
-        except Exception as e:
-            print(f"[FEHLER] Main Loop Exception: {e}")
+            timestamp = datetime.utcnow().strftime("%H:%M:%S")
             
-        # Warten bis zum nächsten Check-Zyklus
-        await asyncio.sleep(config["CHECK_INTERVAL"])
+            # 1. ORACLE DATEN ABRUFEN
+            # (Passe die Funktionsaufrufe an deine Phase 1 an)
+            btc_price, iv = get_deribit_data()
+            if not btc_price or not iv:
+                time.sleep(CONFIG["SLEEP_TIME"])
+                continue
+                
+            print(f"\n[{timestamp}] 🌐 ORACLE UPDATE | BTC: ${btc_price:.2f} | IV: {iv:.2%}")
+
+            # 2. MÄRKTE ABRUFEN
+            markets = get_active_markets()
+            
+            for m in markets:
+                strike = m.get("strike")
+                days_to_expiry = m.get("days_to_expiry")
+                token_id = m.get("token_id")
+                
+                # --- FILTER 1: GAMMA/THETA RISIKO ---
+                if days_to_expiry < CONFIG["MIN_DAYS_TO_EXPIRY"]:
+                    continue
+                    
+                # --- FILTER 2: DYNAMIC ATM TARGETING ---
+                strike_distance = abs(strike - btc_price) / btc_price
+                if strike_distance > CONFIG["MAX_STRIKE_DISTANCE_PCT"]:
+                    continue
+
+                # 3. FAIR VALUE BERECHNEN (BSM)
+                oracle_prob = calculate_bsm_prob(btc_price, strike, days_to_expiry, iv)
+                
+                # 4. ORDERBUCH ABRUFEN
+                pm_bid, pm_ask = get_polymarket_orderbook(token_id)
+                if not pm_bid or not pm_ask or pm_ask <= 0 or pm_bid <= 0:
+                    continue
+
+                # 5. EDGE BERECHNUNG (Realistisch mit Spread)
+                # Wenn wir kaufen, zahlen wir den Ask-Preis.
+                buy_edge = oracle_prob - pm_ask
+                # Wenn wir verkaufen, bekommen wir den Bid-Preis.
+                sell_edge = oracle_prob - pm_bid
+
+                current_shares = inventory.get(token_id, 0)
+
+                # ==========================================
+                # 🟢 ENTRY LOGIC (BUY)
+                # ==========================================
+                if current_shares == 0 and buy_edge >= CONFIG["ENTRY_EDGE"]:
+                    kelly_size_usd = risk_manager.calculate_kelly_size(win_prob=oracle_prob, pm_ask_price=pm_ask)
+                    trade_size_usd = min(kelly_size_usd, CONFIG["MAX_TRADE_SIZE"])
+                    
+                    if trade_size_usd >= 5.0: # Polymarket Minimum
+                        print(f"[{timestamp}] 🟢 BUY SIGNAL | Strike: ${strike} | Edge: {buy_edge:.2%} | Size: ${trade_size_usd:.2f}")
+                        
+                        executed_shares = executor.execute_trade("BUY", token_id, pm_ask, trade_size_usd)
+                        if executed_shares > 0:
+                            inventory[token_id] = executed_shares
+                            save_inventory(inventory)
+                            log_trade("BUY", token_id, strike, pm_ask, executed_shares, buy_edge, trade_size_usd)
+
+                # ==========================================
+                # 🔴 EXIT LOGIC (SELL / TAKE PROFIT / CUT LOSS)
+                # ==========================================
+                elif current_shares > 0:
+                    # Wir verkaufen, wenn der Markt unseren Fair Value erreicht hat (Convergence)
+                    # ODER wenn das Oracle fällt und wir im Minus-Edge sind (Stop Loss)
+                    if sell_edge <= CONFIG["EXIT_EDGE"]:
+                        print(f"[{timestamp}] 🎯 EXIT SIGNAL | Strike: ${strike} | Remaining Edge: {sell_edge:.2%}")
+                        
+                        trade_size_usd = current_shares * pm_bid
+                        executed_shares = executor.execute_trade("SELL", token_id, pm_bid, trade_size_usd)
+                        
+                        if executed_shares > 0:
+                            inventory[token_id] = 0 # Position geschlossen
+                            save_inventory(inventory)
+                            log_trade("SELL", token_id, strike, pm_bid, current_shares, sell_edge, trade_size_usd)
+
+        except Exception as e:
+            print(f"[FEHLER] Hauptschleife: {e}")
+        
+        time.sleep(CONFIG["SLEEP_TIME"])
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[INFO] Bot durch Benutzer beendet (CTRL+C). System fährt sicher herunter.")
+    main()

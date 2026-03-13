@@ -95,8 +95,8 @@ class PolymarketClient:
                                 # Strike-Preis aus der Description oder Question extrahieren
                                 strike = None
                                 
-                                # Bei Up/Down Märkten steht der Strike oft in der Description ("The strike price is $65,432.10")
-                                match = re.search(r'strike price is \$?([0-9,]+(\.[0-9]+)?)', description, re.IGNORECASE)
+                                # Bei Up/Down Märkten steht der Strike oft in der Description ("The strike price is $65,432.10" oder "Strike: $65000")
+                                match = re.search(r'strike(?: price)?(?: is)?\s*\$?([0-9,]+(\.[0-9]+)?)', description, re.IGNORECASE)
                                 if match:
                                     strike = float(match.group(1).replace(',', ''))
                                 else:
@@ -115,6 +115,7 @@ class PolymarketClient:
                                             pass
                                             
                                 if not strike:
+                                    print(f"[DEBUG] 15m-Markt gefunden, aber Strike fehlt: {question} | Desc: {description[:100]}...")
                                     continue # Ohne Strike können wir kein BSM berechnen
                                     
                                 end_date_str = market.get("endDate")
@@ -136,9 +137,11 @@ class PolymarketClient:
                                 token_ids = market.get("clobTokenIds", [])
                                 
                                 try:
-                                    yes_index = next(i for i, x in enumerate(outcomes) if x.lower() == "yes")
+                                    # Bei Up/Down Märkten heißen die Outcomes "Up" und "Down", nicht "Yes" und "No"!
+                                    yes_index = next(i for i, x in enumerate(outcomes) if x.lower() in ["yes", "up"])
                                     yes_token_id = token_ids[yes_index]
                                 except (ValueError, StopIteration):
+                                    print(f"[DEBUG] Konnte 'Up'/'Yes' Outcome nicht finden. Outcomes: {outcomes}")
                                     continue
                                     
                                 btc_markets.append({

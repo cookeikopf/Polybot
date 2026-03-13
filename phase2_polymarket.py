@@ -46,6 +46,89 @@ class PolymarketClient:
             except Exception as e:
                 raise Exception(f"Fehler bei der Marktsuche: {e}")
 
+    async def get_active_btc_markets(self) -> list:
+        """
+        Sucht in der Polymarket Gamma API nach aktiven Bitcoin-Märkten,
+        extrahiert den Strike-Preis und das Ablaufdatum.
+        """
+        import re
+        from datetime import datetime
+        
+        # Polymarket Gamma API Endpoint für Märkte (wir holen mehr als 100, um sicherzugehen)
+        url = f"{self.gamma_url}/markets?limit=500&active=true&closed=false"
+        
+        btc_markets = []
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        markets = await response.json()
+                        
+                        for market in markets:
+                            question = market.get("question", "")
+                            # Filtere nach Bitcoin/BTC und "above" (typische Preis-Märkte)
+                            if ("bitcoin" in question.lower() or "btc" in question.lower()) and "above" in question.lower():
+                                
+                                # Strike Preis extrahieren (z.B. "$70,000" -> 70000.0)
+                                match = re.search(r'\$([0-9,]+(\.[0-9]+)?)', question)
+                                if not match:
+                                    continue
+                                    
+                                strike_str = match.group(1).replace(',', '')
+                                try:
+                                    strike = float(strike_str)
+                                except ValueError:
+                                    continue
+                                
+                                # Ablaufdatum extrahieren (endDate)
+                                end_date_str = market.get("endDate")
+                                if not end_date_str:
+                                    continue
+                                    
+                                # Polymarket endDate Format: "2024-03-15T00:00:00Z"
+                                try:
+                                    # Entferne das Z und Millisekunden für sauberes Parsing
+                                    clean_date_str = end_date_str.split('.')[0].replace('Z', '')
+                                    end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
+                                    now = datetime.utcnow()
+                                    days_to_expiry = (end_date - now).total_seconds() / 86400.0
+                                    
+                                    # Wir wollen nur Märkte, die noch in der Zukunft liegen
+                                    if days_to_expiry <= 0:
+                                        continue
+                                        
+                                except Exception as e:
+                                    print(f"[WARNUNG] Datums-Parsing Fehler für {end_date_str}: {e}")
+                                    continue
+                                
+                                # Token ID für "Yes" Outcome finden
+                                outcomes = market.get("outcomes", [])
+                                token_ids = market.get("clobTokenIds", [])
+                                
+                                try:
+                                    # Finde den Index für "Yes" (case-insensitive)
+                                    yes_index = next(i for i, x in enumerate(outcomes) if x.lower() == "yes")
+                                    yes_token_id = token_ids[yes_index]
+                                except (ValueError, StopIteration):
+                                    continue
+                                    
+                                btc_markets.append({
+                                    "question": question,
+                                    "strike": strike,
+                                    "days_to_expiry": days_to_expiry,
+                                    "token_id": yes_token_id,
+                                    "expiry_date_str": end_date.strftime("%Y-%m-%d %H:%M:%S")
+                                })
+                                
+                        return btc_markets
+                    else:
+                        print(f"[FEHLER] Gamma API Status: {response.status}")
+                        return []
+            except Exception as e:
+                print(f"[FEHLER] get_active_btc_markets: {e}")
+                return []
+
     async def get_orderbook(self, token_id: str) -> dict:
         """
         Ruft das Orderbuch für eine spezifische Token-ID über die Polymarket CLOB API ab.

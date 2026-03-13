@@ -87,28 +87,16 @@ async def main():
 
             # 2. MÄRKTE ABRUFEN
             pm_client = PolymarketClient()
-            # Wir holen uns einen Beispielmarkt (da get_active_markets nicht existiert)
-            # In einer echten Implementierung müsste hier eine Liste von Märkten von Polymarket geholt werden
-            # Für diesen Forward-Test simulieren wir eine Liste mit einem Markt, den wir über find_market_token finden könnten
-            # oder wir nutzen den Hardcoded-Markt aus Phase 3 als Basis für die Suche
             
-            # Da wir dynamisches Targeting wollen, bräuchten wir eigentlich alle Polymarket BTC Märkte.
-            # Da wir die Funktion nicht haben, simulieren wir das Iterieren über einen bekannten Markt
-            # oder wir suchen nach "Bitcoin" Märkten.
+            # Hole alle aktiven BTC-Märkte von Polymarket
+            markets = await pm_client.get_active_btc_markets()
             
-            # HACK: Da wir get_active_markets nicht haben, suchen wir nach einem Markt
-            try:
-                market_info = await pm_client.find_market_token("Bitcoin")
-                markets = [{
-                    "strike": 100000.0, # Dummy Strike, da find_market_token den Strike nicht parst
-                    "days_to_expiry": 30.0, # Dummy Expiry
-                    "token_id": market_info["token_id"],
-                    "expiry_date_str": "2026-12-31 08:00:00"
-                }]
-            except Exception as e:
-                print(f"Fehler bei der Marktsuche: {e}")
-                markets = []
-
+            if not markets:
+                print(f"[{timestamp}] ⚠️ Keine aktiven BTC-Märkte gefunden.")
+                await asyncio.sleep(CONFIG["SLEEP_TIME"])
+                continue
+                
+            print(f"[{timestamp}] 🔍 {len(markets)} BTC-Märkte gefunden. Analysiere Edge...")
             
             for m in markets:
                 strike = m.get("strike")
@@ -185,7 +173,7 @@ async def main():
         except Exception as e:
             print(f"[FEHLER] Hauptschleife: {e}")
         
-        time.sleep(CONFIG["SLEEP_TIME"])
+        await asyncio.sleep(CONFIG["SLEEP_TIME"])
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -3,6 +3,7 @@ import time
 import json
 import os
 import csv
+import math
 from datetime import datetime
 
 # Importiere die Module aus den vorherigen Phasen
@@ -20,12 +21,13 @@ from phase5_execution import PolymarketExecutor
 # ==========================================
 CONFIG = {
     "LIVE_MODE": False,               # Forward-Test Modus (Paper Trading)
-    "ACCOUNT_BALANCE": 1000.0,        # Virtuelles Startkapital
+    "ACCOUNT_BALANCE": 100.0,         # Virtuelles Startkapital (Reset auf 100)
     "MAX_TRADE_SIZE": 100.0,          # Hartes Limit pro Trade in USD
     
     # --- Dynamic Targeting ---
     "MAX_STRIKE_DISTANCE_PCT": 0.08,  # Max 8% vom aktuellen BTC Preis (Fokus auf ATM)
-    "MIN_DAYS_TO_EXPIRY": 1.0,        # Keine Märkte unter 24h (Gamma-Risiko minimieren)
+    "MIN_DAYS_TO_EXPIRY": 0.005,      # Erlaubt auch extrem kurze Märkte (Gamma-Filter regelt das Risiko)
+    "MAX_DAILY_MOVE_PCT": 0.04,       # Erwartete max. BTC Bewegung pro Tag (4%) - skaliert mit Wurzel der Zeit
     
     # --- Hysteresis (Anti-Churning) ---
     "ENTRY_EDGE": 0.05,               # BUY: Wir steigen erst ab 5% echtem Edge ein
@@ -133,6 +135,15 @@ async def main():
                 # Wir lockern den Filter für den Fallback-Markt ($1M), damit das Script weiterläuft
                 if strike_distance > CONFIG["MAX_STRIKE_DISTANCE_PCT"] and strike != 1000000.0:
                     continue
+
+                # --- FILTER 3: GAMMA RISK (SQUARE ROOT OF TIME) ---
+                # Volatilität skaliert nicht linear, sondern mit der Wurzel der Zeit!
+                # Das erlaubt dynamische Anpassung für 15m, 1h, 12h und Daily Markets.
+                if strike != 1000000.0:
+                    max_allowed_distance = math.sqrt(days_to_expiry) * CONFIG["MAX_DAILY_MOVE_PCT"]
+                    if strike_distance > max_allowed_distance:
+                        # print(f"[{timestamp}] ⚠️ GAMMA RISK REJECT | Strike: ${strike} | Dist: {strike_distance:.2%} | Max Allowed: {max_allowed_distance:.2%} | Days: {days_to_expiry:.4f}")
+                        continue
 
                 # 3. FAIR VALUE BERECHNEN (BSM)
                 # T in Jahren berechnen

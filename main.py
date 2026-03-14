@@ -157,7 +157,13 @@ async def main():
                 # Wenn wir verkaufen, bekommen wir den Bid-Preis.
                 sell_edge = oracle_prob - pm_bid
 
-                current_shares = inventory.get(token_id, 0)
+                pos_data = inventory.get(token_id, 0)
+                if isinstance(pos_data, dict):
+                    current_shares = pos_data.get("shares", 0)
+                    entry_price = pos_data.get("entry_price", 0)
+                else:
+                    current_shares = pos_data
+                    entry_price = 0
 
                 # ==========================================
                 # 🟢 ENTRY LOGIC (BUY)
@@ -172,7 +178,11 @@ async def main():
                         
                         executed_shares = executor.execute_trade("BUY", token_id, pm_ask, trade_size_usd)
                         if executed_shares > 0:
-                            inventory[token_id] = executed_shares
+                            inventory[token_id] = {
+                                "shares": executed_shares,
+                                "entry_price": pm_ask,
+                                "strike": strike
+                            }
                             save_inventory(inventory)
                             log_trade("BUY", token_id, strike, pm_ask, executed_shares, buy_edge, trade_size_usd)
 
@@ -181,17 +191,50 @@ async def main():
                 # ==========================================
                 elif current_shares > 0:
                     # Wir verkaufen, wenn der Markt unseren Fair Value erreicht hat (Convergence)
-                    # ODER wenn das Oracle fällt und wir im Minus-Edge sind (Stop Loss)
-                    if sell_edge <= CONFIG["EXIT_EDGE"]:
-                        print(f"[{timestamp}] 🎯 EXIT SIGNAL | Strike: ${strike} | Remaining Edge: {sell_edge:.2%}")
+                    # ODER wenn der Preis um mehr als 50% vom Entry gefallen ist (Hard Stop-Loss)
+                    is_convergence_exit = sell_edge <= CONFIG["EXIT_EDGE"]
+                    is_stop_loss = (entry_price > 0) and (pm_bid <= entry_price * 0.5)
+
+                    if is_convergence_exit or is_stop_loss:
+                        if is_stop_loss:
+                            print(f"[{timestamp}] 🛑 STOP LOSS SIGNAL | Strike: ${strike} | Entry: ${entry_price:.2f} | Current: ${pm_bid:.2f}")
+                        else:
+                            print(f"[{timestamp}] 🎯 EXIT SIGNAL | Strike: ${strike} | Remaining Edge: {sell_edge:.2%}")
                         
                         trade_size_usd = current_shares * pm_bid
                         executed_shares = executor.execute_trade("SELL", token_id, pm_bid, trade_size_usd)
                         
                         if executed_shares > 0:
-                            inventory[token_id] = 0 # Position geschlossen
+                            if token_id in inventory:
+                                del inventory[token_id] # Position komplett aus dem Dictionary entfernen
                             save_inventory(inventory)
                             log_trade("SELL", token_id, strike, pm_bid, current_shares, sell_edge, trade_size_usd)
+
+            # ==========================================
+            # 🧹 CLEANUP: ABGELAUFENE / AUFGELÖSTE MÄRKTE
+            # ==========================================
+            active_token_ids = {m.get("token_id") for m in markets}
+            tokens_to_remove = []
+            
+            for t_id, pos_data in inventory.items():
+                if isinstance(pos_data, dict):
+                    shares = pos_data.get("shares", 0)
+                    strike = pos_data.get("strike", 0)
+                else:
+                    shares = pos_data
+                    strike = 0
+                    
+                if shares > 0 and t_id not in active_token_ids:
+                    print(f"[{timestamp}] 💀 MARKT ABGELAUFEN / AUFGELÖST | Token: {t_id} | Shares: {shares}")
+                    # Logge als Totalverlust (Preis = 0.0)
+                    log_trade("LOSS_EXPIRED", t_id, strike, 0.0, shares, 0.0, 0.0)
+                    tokens_to_remove.append(t_id)
+                    
+            for t_id in tokens_to_remove:
+                del inventory[t_id]
+                
+            if tokens_to_remove:
+                save_inventory(inventory)
 
         except Exception as e:
             print(f"[FEHLER] Hauptschleife: {e}")

@@ -30,7 +30,7 @@ CONFIG = {
     "MAX_DAILY_MOVE_PCT": 0.04,       # Erwartete max. BTC Bewegung pro Tag (4%) - skaliert mit Wurzel der Zeit
     
     # --- Hysteresis (Anti-Churning) ---
-    "ENTRY_EDGE": 0.05,               # BUY: Wir steigen erst ab 5% echtem Edge ein
+    "ENTRY_EDGE": 0.08,               # BUY: Erhöht auf 8% für höhere Win-Rate (Qualität > Quantität)
     "EXIT_EDGE": 0.01,                # SELL: Wir steigen aus, wenn der Edge unter 1% fällt (Convergence)
     
     # --- System ---
@@ -202,15 +202,29 @@ async def main():
                 # ==========================================
                 elif current_shares > 0:
                     # Wir verkaufen, wenn der Markt unseren Fair Value erreicht hat (Convergence)
-                    # ODER wenn der Preis um mehr als 50% vom Entry gefallen ist (Hard Stop-Loss)
                     is_convergence_exit = sell_edge <= CONFIG["EXIT_EDGE"]
-                    is_stop_loss = (entry_price > 0) and (pm_bid <= entry_price * 0.5)
+                    
+                    # --- DYNAMIC STOP LOSS ---
+                    # Statt starrer 50%, nutzen wir ein dynamisches Modell:
+                    # 1. Wenn die Option extrem billig war (< $0.15), geben wir ihr mehr Raum (70% Drop erlaubt), da kleine Cent-Schwankungen sonst sofort ausstoppen.
+                    # 2. Wenn die Option teurer war, greift ein 40% Stop-Loss.
+                    # 3. Time-Stop: Wenn der Edge massiv negativ wird (<-15%) UND wir nah an der Expiry sind (< 2 Stunden), cutten wir.
+                    is_stop_loss = False
+                    if entry_price > 0:
+                        if entry_price < 0.15:
+                            is_stop_loss = (pm_bid <= entry_price * 0.30) # 70% Drop
+                        else:
+                            is_stop_loss = (pm_bid <= entry_price * 0.60) # 40% Drop
+                            
+                        # Time-based Edge Stop
+                        if sell_edge < -0.15 and days_to_expiry < (2.0 / 24.0):
+                            is_stop_loss = True
 
                     if is_convergence_exit or is_stop_loss:
                         if is_stop_loss:
-                            print(f"[{timestamp}] 🛑 STOP LOSS SIGNAL | Strike: ${strike} | Entry: ${entry_price:.2f} | Current: ${pm_bid:.2f}")
+                            print(f"[{timestamp}] 🛑 DYNAMIC STOP LOSS | Strike: ${strike} | Entry: ${entry_price:.2f} | Current: ${pm_bid:.2f} | Edge: {sell_edge:.2%}")
                         else:
-                            print(f"[{timestamp}] 🎯 EXIT SIGNAL | Strike: ${strike} | Remaining Edge: {sell_edge:.2%}")
+                            print(f"[{timestamp}] 🎯 CONVERGENCE EXIT | Strike: ${strike} | Remaining Edge: {sell_edge:.2%}")
                         
                         trade_size_usd = current_shares * pm_bid
                         executed_shares = executor.execute_trade("SELL", token_id, pm_bid, trade_size_usd)

@@ -54,7 +54,7 @@ class PolymarketClient:
         oder die aktuelle Periode kurz vor Ablauf geschlossen wird.
         """
         import time
-        from datetime import datetime
+        from datetime import datetime, timezone
         import re
         
         now = int(time.time())
@@ -128,7 +128,7 @@ class PolymarketClient:
                                 try:
                                     clean_date_str = end_date_str.split('.')[0].replace('Z', '')
                                     end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
-                                    now_dt = datetime.utcnow()
+                                    now_dt = datetime.now(timezone.utc).replace(tzinfo=None)
                                     days_to_expiry = (end_date - now_dt).total_seconds() / 86400.0
                                     
                                     if days_to_expiry <= 0:
@@ -180,7 +180,7 @@ class PolymarketClient:
         Nutzt den /events Endpoint (effizienter als /markets) und Pagination.
         """
         import re
-        from datetime import datetime
+        from datetime import datetime, timezone
         
         btc_markets = []
         limit = 100
@@ -252,7 +252,7 @@ class PolymarketClient:
                                 try:
                                     clean_date_str = end_date_str.split('.')[0].replace('Z', '')
                                     end_date = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S")
-                                    now = datetime.utcnow()
+                                    now = datetime.now(timezone.utc).replace(tzinfo=None)
                                     days_to_expiry = (end_date - now).total_seconds() / 86400.0
                                     
                                     if days_to_expiry <= 0:

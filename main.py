@@ -4,7 +4,7 @@ import json
 import os
 import csv
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Importiere die Module aus den vorherigen Phasen
 try:
@@ -26,8 +26,10 @@ CONFIG = {
     
     # --- Dynamic Targeting ---
     "MAX_STRIKE_DISTANCE_PCT": 0.08,  # Max 8% vom aktuellen BTC Preis (Fokus auf ATM)
-    "MIN_DAYS_TO_EXPIRY": 0.005,      # Erlaubt auch extrem kurze Märkte (Gamma-Filter regelt das Risiko)
+    "MIN_DAYS_TO_EXPIRY": 0.25,       # Erhöht auf 0.25 (6 Stunden) -> Fokus auf Daily Markets, keine 15m mehr!
     "MAX_DAILY_MOVE_PCT": 0.04,       # Erwartete max. BTC Bewegung pro Tag (4%) - skaliert mit Wurzel der Zeit
+    "MIN_PRICE": 0.10,                # Keine "Lotto-Tickets" unter 10 Cent kaufen
+    "MAX_PRICE": 0.90,                # Keine sicheren Dinger über 90 Cent kaufen (Capital Tie-up)
     
     # --- Hysteresis (Anti-Churning) ---
     "ENTRY_EDGE": 0.08,               # BUY: Erhöht auf 8% für höhere Win-Rate (Qualität > Quantität)
@@ -57,7 +59,7 @@ def log_trade(action, token_id, strike, price, shares, edge, usd_value):
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow(["Timestamp", "Action", "TokenID", "Strike", "Price", "Shares", "Edge", "USD_Value"])
-        writer.writerow([datetime.utcnow().isoformat(), action, token_id, strike, price, shares, edge, usd_value])
+        writer.writerow([datetime.now(timezone.utc).isoformat(), action, token_id, strike, price, shares, edge, usd_value])
 
 async def main():
     print("===================================================")
@@ -75,7 +77,7 @@ async def main():
 
     while True:
         try:
-            timestamp = datetime.utcnow().strftime("%H:%M:%S")
+            timestamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
             
             # 1. ORACLE DATEN ABRUFEN
             oracle = DeribitOracle()
@@ -94,10 +96,10 @@ async def main():
             # Hole alle aktiven BTC-Märkte von Polymarket (Events Endpoint)
             markets = await pm_client.get_active_btc_markets()
             
-            # Hole zusätzlich den aktuellen 15-Minuten Up/Down Markt (Game-Changer)
-            m15_markets = await pm_client.get_15m_btc_market()
-            if m15_markets:
-                markets.extend(m15_markets)
+            # 15m Märkte wurden deaktiviert, da wir uns auf Daily Markets fokussieren
+            # m15_markets = await pm_client.get_15m_btc_market()
+            # if m15_markets:
+            #     markets.extend(m15_markets)
             
             # FALLBACK: Wenn die API keine kurzfristigen Märkte liefert (Polymarket Liquiditätsproblem),
             # fügen wir manuell einen bekannten Markt hinzu, um das System am Laufen zu halten.
@@ -126,8 +128,18 @@ async def main():
                     strike = btc_price
                 
                 # --- FILTER 1: GAMMA/THETA RISIKO ---
-                # 15m Märkte sind extrem kurzfristig, wir lassen sie explizit durch
-                if not is_15m and days_to_expiry < CONFIG["MIN_DAYS_TO_EXPIRY"]:
+                # Wir filtern alle Märkte, die zu nah an der Expiry sind, AUSSER wir halten bereits Positionen!
+                # Fokus liegt jetzt auf Daily Markets (MIN_DAYS_TO_EXPIRY = 0.25)
+                
+                pos_data = inventory.get(token_id, 0)
+                if isinstance(pos_data, dict):
+                    current_shares = pos_data.get("shares", 0)
+                    entry_price = pos_data.get("entry_price", 0)
+                else:
+                    current_shares = pos_data
+                    entry_price = 0
+
+                if current_shares == 0 and days_to_expiry < CONFIG["MIN_DAYS_TO_EXPIRY"]:
                     continue
                     
                 # --- FILTER 2: DYNAMIC ATM TARGETING ---
@@ -156,7 +168,8 @@ async def main():
                     pm_bid = prices["best_bid"]
                     pm_ask = prices["best_ask"]
                 except Exception as e:
-                    print(f"Fehler beim Abrufen des Orderbuchs für {token_id}: {e}")
+                    if "404" not in str(e):
+                        print(f"[{timestamp}] ⚠️ Orderbuch-Fehler für {token_id[:8]}... : {e}")
                     continue
                 
                 if not pm_bid or not pm_ask or pm_ask <= 0 or pm_bid <= 0:
@@ -168,18 +181,14 @@ async def main():
                 # Wenn wir verkaufen, bekommen wir den Bid-Preis.
                 sell_edge = oracle_prob - pm_bid
 
-                pos_data = inventory.get(token_id, 0)
-                if isinstance(pos_data, dict):
-                    current_shares = pos_data.get("shares", 0)
-                    entry_price = pos_data.get("entry_price", 0)
-                else:
-                    current_shares = pos_data
-                    entry_price = 0
-
                 # ==========================================
                 # 🟢 ENTRY LOGIC (BUY)
                 # ==========================================
                 if current_shares == 0 and buy_edge >= CONFIG["ENTRY_EDGE"]:
+                    # Anti-Lottery Filter: Keine Optionen unter MIN_PRICE oder über MAX_PRICE kaufen
+                    if pm_ask < CONFIG["MIN_PRICE"] or pm_ask > CONFIG["MAX_PRICE"]:
+                        continue
+
                     kelly_result = risk_manager.calculate_position_size(true_prob=oracle_prob, market_price=pm_ask, is_crypto=True)
                     kelly_size_usd = kelly_result.get("bet_size", 0.0)
                     trade_size_usd = min(kelly_size_usd, CONFIG["MAX_TRADE_SIZE"])
@@ -218,6 +227,11 @@ async def main():
                             
                         # Time-based Edge Stop
                         if sell_edge < -0.15 and days_to_expiry < (2.0 / 24.0):
+                            is_stop_loss = True
+                            
+                        # HARD TIME STOP: Niemals durch die Expiration halten (Lotterie).
+                        # Wenn weniger als ~30 Minuten (0.02 Tage) übrig sind, verkaufen wir.
+                        if days_to_expiry < 0.02:
                             is_stop_loss = True
 
                     if is_convergence_exit or is_stop_loss:

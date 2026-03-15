@@ -26,13 +26,13 @@ CONFIG = {
     
     # --- Dynamic Targeting ---
     "MAX_STRIKE_DISTANCE_PCT": 0.08,  # Max 8% vom aktuellen BTC Preis (Fokus auf ATM)
-    "MIN_DAYS_TO_EXPIRY": 0.25,       # Erhöht auf 0.25 (6 Stunden) -> Fokus auf Daily Markets, keine 15m mehr!
+    "MIN_DAYS_TO_EXPIRY": 0.003,      # Reduziert auf ~4.3 Minuten (Erlaubt 15m Märkte)
     "MAX_DAILY_MOVE_PCT": 0.04,       # Erwartete max. BTC Bewegung pro Tag (4%) - skaliert mit Wurzel der Zeit
     "MIN_PRICE": 0.10,                # Keine "Lotto-Tickets" unter 10 Cent kaufen
     "MAX_PRICE": 0.90,                # Keine sicheren Dinger über 90 Cent kaufen (Capital Tie-up)
     
     # --- Hysteresis (Anti-Churning) ---
-    "ENTRY_EDGE": 0.04,               # BUY: Reduziert auf 4% für Daily Markets (effizienteres Pricing)
+    "BASE_ENTRY_EDGE": 0.02,          # BUY: Basis-Edge für Daily Markets (wird dynamisch skaliert)
     "EXIT_EDGE": 0.01,                # SELL: Wir steigen aus, wenn der Edge unter 1% fällt (Convergence)
     
     # --- System ---
@@ -63,10 +63,10 @@ def log_trade(action, token_id, strike, price, shares, edge, usd_value):
 
 async def main():
     print("===================================================")
-    print("🧠 STATARB BOT - INSTITUTIONAL GRADE (V2.1)")
+    print("🧠 STATARB BOT - INSTITUTIONAL GRADE (V3.0 Multi-TF)")
     print("===================================================")
     print(f"Live Mode:      {CONFIG['LIVE_MODE']}")
-    print(f"Entry Edge:     {CONFIG['ENTRY_EDGE']:.2%}")
+    print(f"Base Entry Edge:{CONFIG['BASE_ENTRY_EDGE']:.2%}")
     print(f"Exit Edge:      {CONFIG['EXIT_EDGE']:.2%}")
     print(f"Max Distance:   {CONFIG['MAX_STRIKE_DISTANCE_PCT']:.2%}")
     print("===================================================")
@@ -96,10 +96,10 @@ async def main():
             # Hole alle aktiven BTC-Märkte von Polymarket (Events Endpoint)
             markets = await pm_client.get_active_btc_markets()
             
-            # 15m Märkte wurden deaktiviert, da wir uns auf Daily Markets fokussieren
-            # m15_markets = await pm_client.get_15m_btc_market()
-            # if m15_markets:
-            #     markets.extend(m15_markets)
+            # 15m Märkte wieder aktiviert für Multi-Timeframe Strategie
+            m15_markets = await pm_client.get_15m_btc_market()
+            if m15_markets:
+                markets.extend(m15_markets)
             
             # FALLBACK: Wenn die API keine kurzfristigen Märkte liefert (Polymarket Liquiditätsproblem),
             # fügen wir manuell einen bekannten Markt hinzu, um das System am Laufen zu halten.
@@ -129,7 +129,7 @@ async def main():
                 
                 # --- FILTER 1: GAMMA/THETA RISIKO ---
                 # Wir filtern alle Märkte, die zu nah an der Expiry sind, AUSSER wir halten bereits Positionen!
-                # Fokus liegt jetzt auf Daily Markets (MIN_DAYS_TO_EXPIRY = 0.25)
+                # Fokus liegt jetzt auf Multi-Timeframe (15m, 1h, Daily)
                 
                 pos_data = inventory.get(token_id, 0)
                 if isinstance(pos_data, dict):
@@ -184,17 +184,29 @@ async def main():
                 # ==========================================
                 # 🟢 ENTRY LOGIC (BUY)
                 # ==========================================
-                if current_shares == 0 and buy_edge >= CONFIG["ENTRY_EDGE"]:
+                
+                # DYNAMISCHE PARAMETER BASIEREND AUF LAUFZEIT
+                if days_to_expiry < 0.05: # < 1.2 Stunden (z.B. 15m Märkte)
+                    dyn_entry_edge = 0.06
+                    dyn_max_size = 25.0
+                elif days_to_expiry < 0.25: # < 6 Stunden
+                    dyn_entry_edge = 0.04
+                    dyn_max_size = 50.0
+                else: # Daily Markets
+                    dyn_entry_edge = CONFIG["BASE_ENTRY_EDGE"]
+                    dyn_max_size = CONFIG["MAX_TRADE_SIZE"]
+
+                if current_shares == 0 and buy_edge >= dyn_entry_edge:
                     # Anti-Lottery Filter: Keine Optionen unter MIN_PRICE oder über MAX_PRICE kaufen
                     if pm_ask < CONFIG["MIN_PRICE"] or pm_ask > CONFIG["MAX_PRICE"]:
                         continue
 
                     kelly_result = risk_manager.calculate_position_size(true_prob=oracle_prob, market_price=pm_ask, is_crypto=True)
                     kelly_size_usd = kelly_result.get("bet_size", 0.0)
-                    trade_size_usd = min(kelly_size_usd, CONFIG["MAX_TRADE_SIZE"])
+                    trade_size_usd = min(kelly_size_usd, dyn_max_size)
                     
                     if trade_size_usd >= 5.0: # Polymarket Minimum
-                        print(f"[{timestamp}] 🟢 BUY SIGNAL | Strike: ${strike} | Edge: {buy_edge:.2%} | Size: ${trade_size_usd:.2f}")
+                        print(f"[{timestamp}] 🟢 BUY SIGNAL | Strike: ${strike} | Edge: {buy_edge:.2%} (Req: {dyn_entry_edge:.2%}) | Size: ${trade_size_usd:.2f}")
                         
                         executed_shares = executor.execute_trade("BUY", token_id, pm_ask, trade_size_usd)
                         if executed_shares > 0:
@@ -230,8 +242,8 @@ async def main():
                             is_stop_loss = True
                             
                         # HARD TIME STOP: Niemals durch die Expiration halten (Lotterie).
-                        # Wenn weniger als ~30 Minuten (0.02 Tage) übrig sind, verkaufen wir.
-                        if days_to_expiry < 0.02:
+                        # Wenn weniger als ~3 Minuten (0.002 Tage) übrig sind, verkaufen wir.
+                        if days_to_expiry < 0.002:
                             is_stop_loss = True
 
                     if is_convergence_exit or is_stop_loss:

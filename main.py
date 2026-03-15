@@ -72,7 +72,7 @@ async def main():
     print("===================================================")
 
     inventory = load_inventory()
-    risk_manager = RiskManager(initial_bankroll=CONFIG["ACCOUNT_BALANCE"], kelly_multiplier=0.5, max_bet_size=CONFIG["MAX_TRADE_SIZE"])
+    risk_manager = RiskManager(account_balance=CONFIG["ACCOUNT_BALANCE"], kelly_multiplier=0.5, max_bet_size=CONFIG["MAX_TRADE_SIZE"])
     executor = PolymarketExecutor(live_mode=CONFIG["LIVE_MODE"])
 
     while True:

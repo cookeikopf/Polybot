@@ -292,6 +292,10 @@ class PolymarketClient:
                                 
                         offset += limit
                         
+                except aiohttp.ClientPayloadError as e:
+                    print(f"[WARNUNG] get_active_btc_markets Pagination (Payload Error): {e} - Versuche nächste Seite...")
+                    offset += limit
+                    continue
                 except Exception as e:
                     print(f"[FEHLER] get_active_btc_markets Pagination: {e}")
                     break

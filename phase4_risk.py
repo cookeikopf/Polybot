@@ -4,8 +4,13 @@ class RiskManager:
     Implementiert das Kelly-Kriterium für Binäre Optionen zur optimalen Kapitalallokation.
     INKLUSIVE realistischer Simulation von Slippage und Polymarket Taker Fees!
     """
-    def __init__(self, initial_bankroll: float, kelly_multiplier: float = 0.5, min_bet_size: float = 5.0, max_bet_size: float = 100.0, default_slippage: float = 0.003):
-        self.bankroll = initial_bankroll
+    def __init__(self, account_balance: float = 100.0, kelly_multiplier: float = 0.5, min_bet_size: float = 5.0, max_bet_size: float = 100.0, default_slippage: float = 0.003, **kwargs):
+        # Fallback für alte Parameter-Namen
+        if "initial_bankroll" in kwargs and account_balance == 100.0:
+            self.bankroll = kwargs["initial_bankroll"]
+        else:
+            self.bankroll = account_balance
+            
         self.kelly_multiplier = kelly_multiplier  # Standard: Half-Kelly (0.5) für geringere Volatilität
         self.min_bet_size = min_bet_size
         self.max_bet_size = max_bet_size

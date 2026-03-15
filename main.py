@@ -32,7 +32,7 @@ CONFIG = {
     "MAX_PRICE": 0.90,                # Keine sicheren Dinger über 90 Cent kaufen (Capital Tie-up)
     
     # --- Hysteresis (Anti-Churning) ---
-    "ENTRY_EDGE": 0.08,               # BUY: Erhöht auf 8% für höhere Win-Rate (Qualität > Quantität)
+    "ENTRY_EDGE": 0.04,               # BUY: Reduziert auf 4% für Daily Markets (effizienteres Pricing)
     "EXIT_EDGE": 0.01,                # SELL: Wir steigen aus, wenn der Edge unter 1% fällt (Convergence)
     
     # --- System ---
@@ -63,7 +63,7 @@ def log_trade(action, token_id, strike, price, shares, edge, usd_value):
 
 async def main():
     print("===================================================")
-    print("🧠 STATARB BOT - INSTITUTIONAL GRADE (V2.0)")
+    print("🧠 STATARB BOT - INSTITUTIONAL GRADE (V2.1)")
     print("===================================================")
     print(f"Live Mode:      {CONFIG['LIVE_MODE']}")
     print(f"Entry Edge:     {CONFIG['ENTRY_EDGE']:.2%}")

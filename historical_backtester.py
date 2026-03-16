@@ -104,9 +104,22 @@ async def main():
         strike = target_market["strike"]
         
         # Enddatum parsen
-        end_date_str = target_market.get("endDate", target_market.get("end_date", ""))
-        clean_date_str = end_date_str.split('.')[0].replace('Z', '')
-        expiry_dt = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        end_date_str = target_market.get("expiry_date_str", "")
+        if not end_date_str:
+            print("❌ Fehler: Konnte Ablaufdatum des Marktes nicht finden.")
+            return
+            
+        try:
+            # Versuche zuerst das Format aus phase2_polymarket.py
+            expiry_dt = datetime.strptime(end_date_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            try:
+                # Fallback für ISO Format
+                clean_date_str = end_date_str.split('.')[0].replace('Z', '')
+                expiry_dt = datetime.strptime(clean_date_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            except ValueError as e:
+                print(f"❌ Fehler beim Parsen des Datums '{end_date_str}': {e}")
+                return
         
         print(f"📥 Lade historische Polymarket Daten für Strike ${strike:,.2f}...")
         df_pm = await fetch_pm_history(session, token_id, start_s, end_s)

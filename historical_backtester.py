@@ -48,7 +48,8 @@ async def fetch_deribit_historical_price(session, start_ms, end_ms):
         return pd.DataFrame()
 
 async def fetch_pm_history(session, token_id, start_ts, end_ts):
-    url = f"https://clob.polymarket.com/prices-history?market={token_id}&startTs={start_ts}&endTs={end_ts}"
+    # fidelity=10 für 1-Minuten-Kerzen (oder 60 für Stunden-Kerzen)
+    url = f"https://clob.polymarket.com/prices-history?market={token_id}&startTs={start_ts}&endTs={end_ts}&fidelity=10"
     async with session.get(url) as resp:
         if resp.status == 200:
             data = await resp.json()

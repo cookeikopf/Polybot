@@ -138,7 +138,9 @@ async def main():
         print("🧮 Berechne BSM Oracle Probabilities & Edges...")
         
         # T in Jahren berechnen
-        df["T"] = (expiry_dt - df.index).total_seconds() / (365.25 * 24 * 3600)
+        # Timezone-Fix: Mache expiry_dt tz-naive, da df.index tz-naive ist
+        expiry_dt_naive = expiry_dt.replace(tzinfo=None)
+        df["T"] = (expiry_dt_naive - df.index).total_seconds() / (365.25 * 24 * 3600)
         df = df[df["T"] > 0].copy()
         
         # BSM Wahrscheinlichkeit vektorisiert berechnen (1000x schneller als Loops)

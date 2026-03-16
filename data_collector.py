@@ -21,7 +21,8 @@ async def main():
         if not file_exists:
             writer.writerow([
                 "timestamp", "token_id", "strike", "days_to_expiry", 
-                "btc_price", "iv", "oracle_prob", "pm_bid", "pm_ask", "spread_pct"
+                "btc_price", "dvol", "oracle_prob", "pm_bid", "pm_ask", "spread_pct",
+                "deribit_mark_iv", "deribit_delta"
             ])
 
     while True:
@@ -65,10 +66,23 @@ async def main():
                     
                 spread_pct = (pm_ask - pm_bid) / pm_ask
                 
+                # Versuche die exakten Greeks für diesen Strike von Deribit zu holen
+                # Polymarket Expiry ist oft 08:00:00 UTC, was mit Deribit übereinstimmt
+                expiry_date_str = m.get("expiry_date_str", "")
+                deribit_mark_iv = ""
+                deribit_delta = ""
+                
+                if expiry_date_str:
+                    greeks = await oracle.get_option_greeks("BTC", strike, expiry_date_str)
+                    if greeks:
+                        deribit_mark_iv = round(greeks["mark_iv"], 4)
+                        deribit_delta = round(greeks["delta"], 4)
+                
                 rows_to_write.append([
                     timestamp, token_id, strike, round(days_to_expiry, 4),
                     round(btc_price, 2), round(iv, 4), round(oracle_prob, 4),
-                    round(pm_bid, 4), round(pm_ask, 4), round(spread_pct, 4)
+                    round(pm_bid, 4), round(pm_ask, 4), round(spread_pct, 4),
+                    deribit_mark_iv, deribit_delta
                 ])
             
             # Batch Write für Performance

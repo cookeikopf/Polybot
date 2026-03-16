@@ -62,8 +62,8 @@ class DeribitOracle:
         dt = datetime.strptime(expiry_date_str, "%Y-%m-%d %H:%M:%S")
         return dt.strftime("%d%b%y").upper()
 
-    async def get_option_iv(self, currency: str, target_price: float, expiry_date_str: str) -> float:
-        """Holt die exakte Implied Volatility (mark_iv) für den spezifischen Strike und Verfall."""
+    async def get_option_greeks(self, currency: str, target_price: float, expiry_date_str: str) -> dict:
+        """Holt die exakte Implied Volatility (mark_iv) und das Delta für den spezifischen Strike und Verfall."""
         try:
             date_str = self._format_deribit_date(expiry_date_str)
             strike = int(target_price)
@@ -74,16 +74,23 @@ class DeribitOracle:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as response:
                     data = await response.json()
-                    if "result" in data and "mark_iv" in data["result"]:
-                        iv = data["result"]["mark_iv"]
-                        if iv > 0:
-                            return iv / 100.0 # Als Dezimalwert
+                    if "result" in data:
+                        res = data["result"]
+                        mark_iv = res.get("mark_iv", 0)
+                        greeks = res.get("greeks", {})
+                        delta = greeks.get("delta", 0)
+                        
+                        if mark_iv > 0:
+                            return {
+                                "mark_iv": mark_iv / 100.0,
+                                "delta": delta
+                            }
             return None
         except Exception as e:
-            print(f"[WARNUNG] Konnte spezifische IV nicht abrufen: {e}")
+            # print(f"[WARNUNG] Konnte spezifische Greeks nicht abrufen: {e}")
             return None
 
-    async def evaluate_target(self, currency: str, target_price: float, expiry_date_str: str) -> dict:
+    async def get_option_iv(self, currency: str, target_price: float, expiry_date_str: str) -> float:
         """
         Evaluiert die Wahrscheinlichkeit für ein spezifisches Preisziel und Datum.
         expiry_date_str: Format 'YYYY-MM-DD HH:MM:SS' (UTC)

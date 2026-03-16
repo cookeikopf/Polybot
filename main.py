@@ -32,8 +32,8 @@ CONFIG = {
     "MAX_PRICE": 0.90,                # Keine sicheren Dinger über 90 Cent kaufen (Capital Tie-up)
     
     # --- Hysteresis (Anti-Churning) ---
-    "BASE_ENTRY_EDGE": 0.02,          # BUY: Basis-Edge für Daily Markets (wird dynamisch skaliert)
-    "EXIT_EDGE": 0.01,                # SELL: Wir steigen aus, wenn der Edge unter 1% fällt (Convergence)
+    "BASE_ENTRY_EDGE": 0.20,          # BUY: Erhöht auf 20% (Daten zeigen: High Edge = High Return)
+    "EXIT_EDGE": -0.03,               # SELL: Wir warten, bis der Markt das Oracle um 3% übertrifft (Profit-Run)
     
     # --- System ---
     "SLEEP_TIME": 15                  # Pause zwischen den Scans in Sekunden
@@ -187,14 +187,14 @@ async def main():
                 
                 # DYNAMISCHE PARAMETER BASIEREND AUF LAUFZEIT
                 if days_to_expiry < 0.05: # < 1.2 Stunden (z.B. 15m Märkte)
-                    dyn_entry_edge = 0.06
-                    dyn_max_size = 25.0
-                elif days_to_expiry < 0.25: # < 6 Stunden
-                    dyn_entry_edge = 0.04
+                    dyn_entry_edge = 0.25
                     dyn_max_size = 50.0
+                elif days_to_expiry < 0.25: # < 6 Stunden
+                    dyn_entry_edge = 0.20
+                    dyn_max_size = 100.0
                 else: # Daily Markets
                     dyn_entry_edge = CONFIG["BASE_ENTRY_EDGE"]
-                    dyn_max_size = CONFIG["MAX_TRADE_SIZE"]
+                    dyn_max_size = 250.0 # Erhöht für High-Edge Trades
 
                 if current_shares == 0 and buy_edge >= dyn_entry_edge:
                     # Anti-Lottery Filter: Keine Optionen unter MIN_PRICE oder über MAX_PRICE kaufen
@@ -223,7 +223,17 @@ async def main():
                 # ==========================================
                 elif current_shares > 0:
                     # Wir verkaufen, wenn der Markt unseren Fair Value erreicht hat (Convergence)
-                    is_convergence_exit = sell_edge <= CONFIG["EXIT_EDGE"]
+                    # NEU: Wir unterscheiden zwischen "Profit Run" und "Thesis Invalidation"
+                    is_profitable = pm_bid > (entry_price * 1.02) if entry_price > 0 else False
+                    
+                    # 1. Profit Run: Markt hat das Oracle übertroffen (Edge < -3%) UND wir sind im Profit
+                    profit_exit = (sell_edge <= CONFIG["EXIT_EDGE"]) and is_profitable
+                    
+                    # 2. Thesis Invalidation: Oracle ist massiv gefallen, Edge ist stark negativ, aber wir sind im Minus
+                    # Hier cutten wir den Trade frühzeitig, bevor der harte Stop-Loss greift.
+                    thesis_invalid_exit = (sell_edge <= -0.10) and not is_profitable
+                    
+                    is_convergence_exit = profit_exit or thesis_invalid_exit
                     
                     # --- DYNAMIC STOP LOSS ---
                     # Statt starrer 50%, nutzen wir ein dynamisches Modell:

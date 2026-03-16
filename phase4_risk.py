@@ -59,7 +59,15 @@ class RiskManager:
         full_kelly_pct = (true_prob - total_cost) / (1.0 - total_cost)
 
         # 6. Fractional Kelly anwenden (Risiko-Dämpfung)
-        adj_kelly_pct = full_kelly_pct * self.kelly_multiplier
+        # Dynamischer Multiplikator: Höherer Edge = Höheres Vertrauen = Größere Position
+        if edge > 0.30:
+            dynamic_kelly = min(self.kelly_multiplier * 1.5, 1.0) # 30%+ Edge -> Aggressiver
+        elif edge > 0.20:
+            dynamic_kelly = self.kelly_multiplier # 20-30% Edge -> Standard
+        else:
+            dynamic_kelly = self.kelly_multiplier * 0.5 # <20% Edge -> Defensiv
+            
+        adj_kelly_pct = full_kelly_pct * dynamic_kelly
 
         # 7. Absolute Positionsgröße berechnen
         raw_bet_size = self.bankroll * adj_kelly_pct

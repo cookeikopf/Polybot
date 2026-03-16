@@ -30,7 +30,8 @@ async def main():
             timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
             
             # 1. Oracle Daten
-            btc_price, iv = oracle.get_btc_data()
+            btc_price = await oracle.get_index_price("BTC")
+            iv = await oracle.get_implied_volatility("BTC")
             if not btc_price or not iv:
                 print(f"[{timestamp}] ⚠️ Warte auf Deribit-Daten...")
                 await asyncio.sleep(15)

@@ -26,7 +26,7 @@ CONFIG = {
     
     # --- Dynamic Targeting ---
     "MAX_STRIKE_DISTANCE_PCT": 0.08,  # Max 8% vom aktuellen BTC Preis (Fokus auf ATM)
-    "MIN_DAYS_TO_EXPIRY": 0.003,      # Reduziert auf ~4.3 Minuten (Erlaubt 15m Märkte)
+    "MIN_DAYS_TO_EXPIRY": 0.04,       # Erhöht auf ~1 Stunde (Vermeidet 15m Märkte wegen Latenz/Frontrunning)
     "MAX_DAILY_MOVE_PCT": 0.04,       # Erwartete max. BTC Bewegung pro Tag (4%) - skaliert mit Wurzel der Zeit
     "MIN_PRICE": 0.10,                # Keine "Lotto-Tickets" unter 10 Cent kaufen
     "MAX_PRICE": 0.90,                # Keine sicheren Dinger über 90 Cent kaufen (Capital Tie-up)
@@ -175,11 +175,16 @@ async def main():
                 if not pm_bid or not pm_ask or pm_ask <= 0 or pm_bid <= 0:
                     continue
 
-                # 5. EDGE BERECHNUNG (Realistisch mit Spread)
-                # Wenn wir kaufen, zahlen wir den Ask-Preis.
-                buy_edge = oracle_prob - pm_ask
-                # Wenn wir verkaufen, bekommen wir den Bid-Preis.
-                sell_edge = oracle_prob - pm_bid
+                # 5. EDGE BERECHNUNG (Realistisch mit Spread & Fees)
+                # Polymarket Taker Fee ist 2%. Wir berechnen den echten Netto-Edge.
+                pm_ask_fee = pm_ask * 1.02
+                pm_bid_fee = pm_bid * 0.98
+                
+                buy_edge = oracle_prob - pm_ask_fee
+                sell_edge = oracle_prob - pm_bid_fee
+                
+                # SPREAD FILTER: Wenn der Spread zu groß ist, werden wir sofort ausgestoppt.
+                spread_pct = (pm_ask - pm_bid) / pm_ask if pm_ask > 0 else 1.0
 
                 # ==========================================
                 # 🟢 ENTRY LOGIC (BUY)
@@ -189,16 +194,22 @@ async def main():
                 if days_to_expiry < 0.05: # < 1.2 Stunden (z.B. 15m Märkte)
                     dyn_entry_edge = 0.25
                     dyn_max_size = 50.0
+                    max_allowed_spread = 0.05 # 15m Märkte brauchen extrem enge Spreads
                 elif days_to_expiry < 0.25: # < 6 Stunden
                     dyn_entry_edge = 0.20
                     dyn_max_size = 100.0
+                    max_allowed_spread = 0.10
                 else: # Daily Markets
                     dyn_entry_edge = CONFIG["BASE_ENTRY_EDGE"]
-                    dyn_max_size = 250.0 # Erhöht für High-Edge Trades
+                    dyn_max_size = 250.0 
+                    max_allowed_spread = 0.15
 
                 if current_shares == 0 and buy_edge >= dyn_entry_edge:
-                    # Anti-Lottery Filter: Keine Optionen unter MIN_PRICE oder über MAX_PRICE kaufen
+                    # Anti-Lottery & Spread Filter
                     if pm_ask < CONFIG["MIN_PRICE"] or pm_ask > CONFIG["MAX_PRICE"]:
+                        continue
+                    if spread_pct > max_allowed_spread:
+                        # print(f"[{timestamp}] ⚠️ SPREAD REJECT | Spread: {spread_pct:.2%} > {max_allowed_spread:.2%}")
                         continue
 
                     kelly_result = risk_manager.calculate_position_size(true_prob=oracle_prob, market_price=pm_ask, is_crypto=True)
@@ -206,7 +217,7 @@ async def main():
                     trade_size_usd = min(kelly_size_usd, dyn_max_size)
                     
                     if trade_size_usd >= 5.0: # Polymarket Minimum
-                        print(f"[{timestamp}] 🟢 BUY SIGNAL | Strike: ${strike} | Edge: {buy_edge:.2%} (Req: {dyn_entry_edge:.2%}) | Size: ${trade_size_usd:.2f}")
+                        print(f"[{timestamp}] 🟢 BUY SIGNAL | Strike: ${strike} | Edge: {buy_edge:.2%} | Spread: {spread_pct:.2%} | Size: ${trade_size_usd:.2f}")
                         
                         executed_shares = executor.execute_trade("BUY", token_id, pm_ask, trade_size_usd)
                         if executed_shares > 0:
@@ -222,9 +233,9 @@ async def main():
                 # 🔴 EXIT LOGIC (SELL / TAKE PROFIT / CUT LOSS)
                 # ==========================================
                 elif current_shares > 0:
-                    # Wir verkaufen, wenn der Markt unseren Fair Value erreicht hat (Convergence)
                     # NEU: Wir unterscheiden zwischen "Profit Run" und "Thesis Invalidation"
-                    is_profitable = pm_bid > (entry_price * 1.02) if entry_price > 0 else False
+                    # is_profitable muss die 2% Taker Fee beim Exit berücksichtigen!
+                    is_profitable = pm_bid_fee > (entry_price * 1.02) if entry_price > 0 else False
                     
                     # 1. Profit Run: Markt hat das Oracle übertroffen (Edge < -3%) UND wir sind im Profit
                     profit_exit = (sell_edge <= CONFIG["EXIT_EDGE"]) and is_profitable
@@ -236,16 +247,12 @@ async def main():
                     is_convergence_exit = profit_exit or thesis_invalid_exit
                     
                     # --- DYNAMIC STOP LOSS ---
-                    # Statt starrer 50%, nutzen wir ein dynamisches Modell:
-                    # 1. Wenn die Option extrem billig war (< $0.15), geben wir ihr mehr Raum (70% Drop erlaubt), da kleine Cent-Schwankungen sonst sofort ausstoppen.
-                    # 2. Wenn die Option teurer war, greift ein 40% Stop-Loss.
-                    # 3. Time-Stop: Wenn der Edge massiv negativ wird (<-15%) UND wir nah an der Expiry sind (< 2 Stunden), cutten wir.
+                    # Der alte Stop-Loss wurde sofort durch den Spread getriggert!
+                    # NEU: Wir geben dem Trade mehr Raum, da der Spread-Filter uns vor Illiquidität schützt.
                     is_stop_loss = False
                     if entry_price > 0:
-                        if entry_price < 0.15:
-                            is_stop_loss = (pm_bid <= entry_price * 0.30) # 70% Drop
-                        else:
-                            is_stop_loss = (pm_bid <= entry_price * 0.60) # 40% Drop
+                        # 50% Hard Stop Loss (echter Drop, nicht nur Spread)
+                        is_stop_loss = (pm_bid <= entry_price * 0.50)
                             
                         # Time-based Edge Stop
                         if sell_edge < -0.15 and days_to_expiry < (2.0 / 24.0):
